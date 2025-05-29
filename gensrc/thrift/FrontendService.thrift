@@ -830,6 +830,7 @@ struct TMasterOpRequest {
     34: optional i32 forward_times
     35: optional string session_id
     36: optional i32 connectionId
+    37: optional i64 txn_id;
 
     101: optional i64 warehouse_id    // begin from 101, in case of conflict with other's change
 }
@@ -862,6 +863,7 @@ struct TMasterOpResult {
     6: optional string resource_group_name;
     7: optional TAuditStatistics audit_statistics;
     8: optional string errorMsg;
+    9: optional i64 txn_id;
 }
 
 struct TIsMethodSupportedRequest {
@@ -1509,6 +1511,7 @@ struct TPartitionMetaInfo {
     26: optional i64 data_version
     27: optional i64 version_epoch
     28: optional Types.TTxnType version_txn_type = Types.TTxnType.TXN_NORMAL
+    29: optional i64 storage_size
 }
 
 struct TGetPartitionsMetaResponse {
@@ -1961,6 +1964,7 @@ struct TConnectionInfo {
     8: optional string state;
     9: optional string info;
     10: optional string isPending;
+    11: optional string warehouse;
 }
 
 struct TListConnectionResponse {
@@ -2122,6 +2126,16 @@ struct TUpdateFailPointResponse {
     1: optional Status.TStatus status;
 }
 
+struct TUpdateTabletVersionRequest {
+    1: optional Types.TBackend backend;
+    2: optional i64 signature;
+    3: optional list<MasterService.TTabletVersionPair> tablet_versions;
+}
+
+struct TUpdateTabletVersionResult {
+    1: optional Status.TStatus status;
+}
+
 service FrontendService {
     TGetDbsResult getDbNames(1:TGetDbsParams params)
     TGetTablesResult getTableNames(1:TGetTablesParams params)
@@ -2263,5 +2277,7 @@ service FrontendService {
     TGetWarehouseQueriesResponse getWarehouseQueries(1: TGetWarehouseQueriesRequest request)
 
     TUpdateFailPointResponse updateFailPointStatus(1: TUpdateFailPointRequest request)
+
+    TUpdateTabletVersionResult updateTabletVersion(1: TUpdateTabletVersionRequest request)
 }
 

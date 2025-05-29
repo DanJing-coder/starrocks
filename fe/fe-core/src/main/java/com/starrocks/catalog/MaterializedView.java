@@ -147,6 +147,24 @@ public class MaterializedView extends OlapTable implements GsonPreProcessable, G
         DEFERRED
     }
 
+    /**
+     * Strategy for selecting candidate partitions to refresh during materialized view refresh.
+     */
+    public enum PartitionRefreshStrategy {
+        /**
+         * STRICT: Traditional strategy.
+         * Selects a fixed number of candidate partitions based on partition_refresh_number.
+         */
+        STRICT,
+
+        /**
+         * ADAPTIVE: Adaptive strategy.
+         * Selects candidate partitions based on thresholds mv_max_rows_per_refresh and mv_max_bytes_per_refresh.
+         * Stops selecting more partitions once either threshold is reached.
+         */
+        ADAPTIVE
+    }
+
     @Override
     public boolean getUseFastSchemaEvolution() {
         return false;
@@ -1518,6 +1536,7 @@ public class MaterializedView extends OlapTable implements GsonPreProcessable, G
                 .add(PropertyAnalyzer.PROPERTIES_AUTO_REFRESH_PARTITIONS_LIMIT)
                 .add(PropertyAnalyzer.PROPERTIES_PARTITION_REFRESH_NUMBER)
                 .add(PropertyAnalyzer.PROPERTIES_EXCLUDED_TRIGGER_TABLES)
+                .add(PropertyAnalyzer.PROPERTIES_PARTITION_REFRESH_STRATEGY)
                 .build();
     }
 
@@ -1964,8 +1983,14 @@ public class MaterializedView extends OlapTable implements GsonPreProcessable, G
                 // TODO: get table from current context rather than metadata catalog
                 // it's fine to re-get table from metadata catalog again since metadata catalog should cache
                 // the newest table info.
-                Table refreshedTable = MvUtils.getTableChecked(tableToBaseTableInfoCache.get(table));
-                result.put(refreshedTable, e.getValue());
+                // NOTE: use getTable rather getTableChecked to avoid throwing exception when table has changed/recreated.
+                // If the table has changed, MVPCTMetaRepairer will handle it rather than throwing exception here.
+                Optional<Table> refreshedTableOpt = MvUtils.getTable(tableToBaseTableInfoCache.get(table));
+                if (refreshedTableOpt.isEmpty()) {
+                    LOG.warn("The table {} is not found in metadata catalog", table.getName());
+                    throw MaterializedViewExceptions.reportBaseTableNotExists(table.getName());
+                }
+                result.put(refreshedTableOpt.get(), e.getValue());
             } else {
                 result.put(table, e.getValue());
             }

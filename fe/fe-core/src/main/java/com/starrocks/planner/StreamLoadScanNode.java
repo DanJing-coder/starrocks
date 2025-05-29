@@ -59,6 +59,7 @@ import com.starrocks.common.CsvFormat;
 import com.starrocks.common.ErrorCode;
 import com.starrocks.common.ErrorReport;
 import com.starrocks.common.StarRocksException;
+import com.starrocks.common.util.UUIDUtil;
 import com.starrocks.load.Load;
 import com.starrocks.load.streamload.StreamLoadInfo;
 import com.starrocks.server.GlobalStateMgr;
@@ -86,9 +87,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
-import java.util.UUID;
 
-import static com.starrocks.catalog.DefaultExpr.SUPPORTED_DEFAULT_FNS;
+import static com.starrocks.catalog.DefaultExpr.isValidDefaultFunction;;
 
 /**
  * used to scan from stream
@@ -318,7 +318,7 @@ public class StreamLoadScanNode extends LoadScanNode {
                     if (defaultValueType == Column.DefaultValueType.CONST) {
                         expr = new StringLiteral(column.calculatedDefaultValue());
                     } else if (defaultValueType == Column.DefaultValueType.VARY) {
-                        if (SUPPORTED_DEFAULT_FNS.contains(column.getDefaultExpr().getExpr())) {
+                        if (isValidDefaultFunction(column.getDefaultExpr().getExpr())) {
                             expr = column.getDefaultExpr().obtainExpr();
                         } else {
                             throw new StarRocksException("Column(" + column + ") has unsupported default value:"
@@ -408,8 +408,7 @@ public class StreamLoadScanNode extends LoadScanNode {
                 case FILE_STREAM:
                     rangeDesc.setPath("Invalid Path");
                     if (needAssignBE) {
-                        UUID uuid = UUID.randomUUID();
-                        rangeDesc.setLoad_id(new TUniqueId(uuid.getMostSignificantBits(), uuid.getLeastSignificantBits()));
+                        rangeDesc.setLoad_id(UUIDUtil.genTUniqueId());
                     } else {
                         rangeDesc.setLoad_id(loadId);
                     }

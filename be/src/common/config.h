@@ -50,7 +50,7 @@ CONF_Int32(brpc_port, "8060");
 CONF_Int32(brpc_num_threads, "-1");
 
 // The max number of single connections maintained by the brpc client and each server.
-// Theses connections are created during the first few access and will be used thereafter
+// These connections are created during the first few access and will be used thereafter
 CONF_Int32(brpc_max_connections_per_server, "1");
 
 // Declare a selection strategy for those servers have many ips.
@@ -60,17 +60,22 @@ CONF_Int32(brpc_max_connections_per_server, "1");
 CONF_String(priority_networks, "");
 CONF_Bool(net_use_ipv6_when_priority_networks_empty, "false");
 
-CONF_mBool(enable_auto_adjust_pagecache, "true");
-// Memory urget water level, if the memory usage exceeds this level, reduce the size of
-// the Pagecache immediately, it should be between (memory_high_level, 100].
+// Memory urged water level, if the memory usage exceeds this level,
+// be will free up some memory immediately to ensure the system runs smoothly.
+// Currently, only support to release memory of data cache and lake memtable.
 CONF_mInt64(memory_urgent_level, "85");
-// Memory high water level, if the memory usage exceeds this level, reduce the size of
-// the Pagecache slowly, it should be between [1, memory_urgent_level).
+// Memory high water level, if the memory usage exceeds this level, be will free up some memory slowly
+// Currently, only support release memory of data cache.
 CONF_mInt64(memory_high_level, "75");
-// Pagecache size adjust period, default 20, it should be between [1, 180].
-CONF_mInt64(pagecache_adjust_period, "20");
-// Sleep time in seconds between pagecache adjust iterations.
-CONF_mInt64(auto_adjust_pagecache_interval_seconds, "10");
+
+// The high disk usage level, which trigger to release of disk space immediately to disk_safe_level,
+// currently only support release disk space of data cache.
+CONF_mInt64(disk_high_level, "90");
+// The safe disk usage level.
+CONF_mInt64(disk_safe_level, "80");
+// The low disk usage level, which triggers increasing the quota for some components,
+// currently only supports data cache.
+CONF_mInt64(disk_low_level, "60");
 
 // process memory limit specified as number of bytes
 // ('<int>[bB]?'), megabytes ('<float>[mM]'), gigabytes ('<float>[gG]'),
@@ -482,6 +487,10 @@ CONF_Int32(make_snapshot_rpc_timeout_ms, "20000");
 // OlapTableSink sender's send interval, should be less than the real response time of a tablet writer rpc.
 CONF_mInt32(olap_table_sink_send_interval_ms, "10");
 
+// The interval that the secondary replica checks it's status on the primary replica if the last check rpc successes.
+CONF_mInt32(load_replica_status_check_interval_ms_on_success, "15000");
+// The interval that the secondary replica checks it's status on the primary replica if the last check rpc fails.
+CONF_mInt32(load_replica_status_check_interval_ms_on_failure, "2000");
 // If load rpc timeout is larger than this value, slow log will be printed every time,
 // if smaller than this value, will reduce slow log print frequency.
 // 0 is print slow log every time.
@@ -502,8 +511,6 @@ CONF_mInt32(load_diagnose_rpc_timeout_stack_trace_threshold_ms, "600000");
 CONF_mInt32(load_fp_brpc_timeout_ms, "-1");
 // Used in load fail point. The block time to simulate TabletsChannel::add_chunk spends much time
 CONF_mInt32(load_fp_tablets_channel_add_chunk_block_ms, "-1");
-// Used in load fail point. The block time to simulate waiting secondary replica spends much time
-CONF_mInt32(load_fp_tablets_channel_wait_secondary_replica_block_ms, "-1");
 
 // The interval for performing stack trace to control the frequency.
 CONF_mInt64(diagnose_stack_trace_interval_ms, "1800000");
@@ -834,6 +841,8 @@ CONF_mBool(enable_bitmap_union_disk_format_with_set, "false");
 
 // pipeline poller timeout guard
 CONF_mInt64(pipeline_poller_timeout_guard_ms, "-1");
+// pipeline fragment prepare timeout guard
+CONF_mInt64(pipeline_prepare_timeout_guard_ms, "-1");
 // whether to enable large column detection in the pipeline execution framework.
 CONF_mBool(pipeline_enable_large_column_checker, "false");
 
@@ -975,7 +984,8 @@ CONF_mBool(parquet_push_down_filter_to_decoder_enable, "true");
 CONF_mBool(parquet_cache_aware_dict_decoder_enable, "true");
 
 CONF_mBool(parquet_reader_enable_adpative_bloom_filter, "true");
-CONF_Double(parquet_page_cache_decompress_threshold, "2.0");
+CONF_Double(parquet_page_cache_decompress_threshold, "1.5");
+CONF_mBool(enable_adjustment_page_cache_skip, "true");
 
 CONF_Int32(io_coalesce_read_max_buffer_size, "8388608");
 CONF_Int32(io_coalesce_read_max_distance_size, "1048576");
@@ -1158,6 +1168,12 @@ CONF_mInt16(pulsar_client_log_level, "2");
 // max loop count when be waiting its fragments to finish. It has no effect if the var is configured with value <= 0.
 CONF_mInt64(loop_count_wait_fragments_finish, "2");
 
+// Determines whether to await at least one frontend heartbeat response indicating SHUTDOWN status before completing graceful exit.
+//
+// When enabled, the graceful shutdown process remains active until a SHUTDOWN confirmation is responded via heartbeat RPC,
+// ensuring the frontend has sufficient time to detect the termination state between two regular heartbeat intervals.
+CONF_mBool(graceful_exit_wait_for_frontend_heartbeat, "false");
+
 // the maximum number of connections in the connection pool for a single jdbc url
 CONF_Int16(jdbc_connection_pool_size, "8");
 // the minimum number of idle connections that connection pool tries to maintain.
@@ -1257,21 +1273,17 @@ CONF_Bool(datacache_persistence_enable, "true");
 CONF_String(datacache_engine, "");
 // The interval time (millisecond) for agent report datacache metrics to FE.
 CONF_mInt32(report_datacache_metrics_interval_ms, "60000");
-// Whether enable automatically adjust cache space quota.
-// If true, the cache will choose an appropriate quota based on the current remaining space as the quota.
-// and the quota also will be changed dynamiclly.
+
+// Whether enable automatically adjust data cache disk space quota.
+// If true, the cache will choose an appropriate quota based on the current remaining disk space as the quota.
+// and the quota also will be changed dynamically.
 // Once the disk space usage reach the high level, the quota will be decreased to keep the disk usage
 // around the disk safe level.
 // On the other hand, if the cache is full and the disk usage falls below the disk low level for a long time,
 // which is configured by `datacache_disk_idle_seconds_for_expansion`, the cache quota will be increased to keep the
 // disk usage around the disk safe level.
-CONF_mBool(datacache_auto_adjust_enable, "true");
-// The high disk usage level, which trigger the cache eviction and quota decreased.
-CONF_mInt64(datacache_disk_high_level, "90");
-// The safe disk usage level, the cache quota will be decreased to this level once it reach the high level.
-CONF_mInt64(datacache_disk_safe_level, "80");
-// The low disk usage level, which trigger the cache expansion and quota increased.
-CONF_mInt64(datacache_disk_low_level, "60");
+CONF_mBool(enable_datacache_disk_auto_adjust, "true");
+
 // The interval seconds to check the disk usage and trigger adjustment.
 CONF_mInt64(datacache_disk_adjust_interval_seconds, "10");
 // The silent period, only when the disk usage falls bellow the low level for a time longer than this period,
@@ -1281,10 +1293,17 @@ CONF_mInt64(datacache_disk_idle_seconds_for_expansion, "7200");
 // cache quota will be reset to zero to avoid overly frequent population and eviction.
 // Default: 100G
 CONF_mInt64(datacache_min_disk_quota_for_adjustment, "107374182400");
-// The maxmum inline cache item count in datacache.
-// When a cache item has a really small data size, we will try to cache it inline with its metadata
+// The maximum inline cache item count in datacache.
+// When a cache item has a tiny data size, we will try to cache it inline with its metadata
 // to optimize the io performance and reduce disk waste.
 // Set the parameter to `0` will turn off this optimization.
+
+CONF_mBool(enable_datacache_mem_auto_adjust, "true");
+// Datacache size adjust period, default 20, it should be between [1, 180].
+CONF_mInt64(datacache_mem_adjust_period, "20");
+// Sleep time in seconds between datacache adjust iterations.
+CONF_mInt64(datacache_mem_adjust_interval_seconds, "10");
+
 CONF_Int32(datacache_inline_item_count_limit, "130172");
 // Whether use an unified datacache instance.
 CONF_Bool(datacache_unified_instance_enable, "true");
@@ -1293,12 +1312,14 @@ CONF_Bool(datacache_unified_instance_enable, "true");
 // * slru: segment lru eviction policies, which can better reduce cache pollution problem.
 CONF_String(datacache_eviction_policy, "slru");
 
-// The following configurations will be deprecated, and we use the `datacache` prefix instead.
-// But it is temporarily necessary to keep them for a period of time to be compatible with
-// the old configuration files.
-CONF_Bool(block_cache_enable, "false");
-CONF_Int64(block_cache_disk_size, "0");
-CONF_Int64(block_cache_mem_size, "2147483648"); // 2GB
+// The BlockCache stores the raw data blocks of external tables and shared-data internal tables.
+// It shares the same limit (datacache_disk_size, datacache_mem_size) with the PageCache.
+// Currently, the disk space used by BlockCache cannot be individually configured
+// using block_cache_disk_size and block_cache_mem_size.
+// However, these two configuration items are retained for future support.
+CONF_Bool(block_cache_enable, "true");
+CONF_mString(block_cache_disk_size, "-1");
+CONF_mInt64(block_cache_mem_size, "0");
 CONF_Alias(datacache_block_size, block_cache_block_size);
 CONF_Alias(datacache_max_concurrent_inserts, block_cache_max_concurrent_inserts);
 CONF_Alias(datacache_checksum_enable, block_cache_checksum_enable);
@@ -1386,6 +1407,15 @@ CONF_String(exception_stack_black_list, "apache::thrift::,ue2::,arangodb::");
 CONF_String(rocksdb_cf_options_string, "block_based_table_factory={block_cache={capacity=256M;num_shard_bits=0}}");
 
 CONF_String(rocksdb_db_options_string, "create_if_missing=true;create_missing_column_families=true");
+
+// It is the memory percent of write buffer for meta in rocksdb.
+// default is 5% of system memory.
+// However, aside from this, the final calculated size of the write buffer memory
+// will not be less than 64MB nor exceed 1GB (rocksdb_max_write_buffer_memory_bytes).
+CONF_Int64(rocksdb_write_buffer_memory_percent, "5");
+// It is the max size of the write buffer for meta in rocksdb.
+// default is 1GB.
+CONF_Int64(rocksdb_max_write_buffer_memory_bytes, "1073741824");
 
 // limit local exchange buffer's memory size per driver
 CONF_Int64(local_exchange_buffer_mem_limit_per_driver, "134217728"); // 128MB
@@ -1561,7 +1591,10 @@ CONF_mBool(enable_core_file_size_optimization, "true");
 // 9. wg_driver_executor
 // use commas to separate:
 // * means release all above
-CONF_mString(try_release_resource_before_core_dump, "data_cache");
+// TODO(zhangqiang)
+// can not set data_cache right now because release datacache may cause BE hang
+// https://github.com/StarRocks/starrocks/issues/59226
+CONF_mString(try_release_resource_before_core_dump, "");
 
 // Experimental feature, this configuration will be removed after testing is complete.
 CONF_mBool(lake_enable_alter_struct, "true");
@@ -1663,4 +1696,6 @@ CONF_mInt64(split_exchanger_buffer_chunk_num, "1000");
 
 // when to split hashmap/hashset into two level hashmap/hashset, negative number means use default value
 CONF_mInt64(two_level_memory_threshold, "-1");
+
+CONF_mInt32(max_update_tablet_version_internal_ms, "5000");
 } // namespace starrocks::config

@@ -96,6 +96,8 @@ Status HiveDataSource::open(RuntimeState* state) {
                 "Invalid table type. Only hive/iceberg/hudi/delta lake/file/paimon/kudu table are supported");
     }
     RETURN_IF_ERROR(_check_all_slots_nullable());
+    bool enable_cache_select =
+            state->query_options().__isset.enable_cache_select && state->query_options().enable_cache_select;
 
     // Check that the system meets the requirements for enabling DataCache
     if (BlockCache::instance()->available()) {
@@ -109,7 +111,7 @@ Status HiveDataSource::open(RuntimeState* state) {
             datacache_ttl_seconds = state->query_options().datacache_ttl_seconds;
         }
 
-        if (state->query_options().__isset.enable_cache_select && state->query_options().enable_cache_select) {
+        if (enable_cache_select) {
             // set datacache options for cache select
             _datacache_options = DataCacheOptions{.enable_datacache = true,
                                                   .enable_cache_select = true,
@@ -132,7 +134,7 @@ Status HiveDataSource::open(RuntimeState* state) {
                 enable_populate_datacache = state->query_options().enable_populate_datacache;
             }
 
-            const bool enable_datacache_aync_populate_mode =
+            const bool enable_datacache_async_populate_mode =
                     state->query_options().__isset.enable_datacache_async_populate_mode &&
                     state->query_options().enable_datacache_async_populate_mode;
             const bool enable_datacache_io_adaptor = state->query_options().__isset.enable_datacache_io_adaptor &&
@@ -147,13 +149,16 @@ Status HiveDataSource::open(RuntimeState* state) {
                     DataCacheOptions{.enable_datacache = true,
                                      .enable_cache_select = false,
                                      .enable_populate_datacache = enable_populate_datacache,
-                                     .enable_datacache_async_populate_mode = enable_datacache_aync_populate_mode,
+                                     .enable_datacache_async_populate_mode = enable_datacache_async_populate_mode,
                                      .enable_datacache_io_adaptor = enable_datacache_io_adaptor,
                                      .modification_time = _scan_range.modification_time,
                                      .datacache_evict_probability = datacache_evict_probability,
                                      .datacache_priority = datacache_priority,
                                      .datacache_ttl_seconds = datacache_ttl_seconds};
         }
+    } else if (enable_cache_select) {
+        _no_data = true;
+        return Status::OK();
     }
 
     // Don't use datacache when priority = -1
@@ -173,7 +178,7 @@ Status HiveDataSource::open(RuntimeState* state) {
     if (state->query_options().__isset.enable_file_pagecache) {
         _use_file_pagecache = state->query_options().enable_file_pagecache;
     }
-    _use_file_pagecache &= BlockCache::instance()->mem_cache_available();
+    _use_file_pagecache &= !config::disable_storage_page_cache;
 #endif
 
     if (state->query_options().__isset.enable_dynamic_prune_scan_range) {
@@ -234,7 +239,6 @@ Status HiveDataSource::_init_conjunct_ctxs(RuntimeState* state) {
 
 Status HiveDataSource::_init_partition_values() {
     if (!(_hive_table != nullptr && _has_partition_columns)) return Status::OK();
-
     auto* partition_desc = _hive_table->get_partition(_scan_range.partition_id);
     if (partition_desc == nullptr) {
         return Status::InternalError(
@@ -438,10 +442,23 @@ Status HiveDataSource::_decompose_conjunct_ctxs(RuntimeState* state) {
                 break;
             }
         }
-        if (!single_slot || slot_ids.empty()) {
+
+        bool single_field = true;
+        if (!slot_ids.empty() && single_slot) {
+            std::vector<std::vector<std::string>> subfields;
+            root_expr->get_subfields(&subfields);
+
+            for (int i = 1; i < subfields.size(); i++) {
+                if (subfields[i] != subfields[0]) {
+                    single_field = false;
+                    break;
+                }
+            }
+        }
+        if (!single_slot || slot_ids.empty() || !single_field) {
             _scanner_conjunct_ctxs.emplace_back(ctx);
             for (SlotId slot_id : slot_ids) {
-                _slots_of_mutli_slot_conjunct.insert(slot_id);
+                _slots_of_multi_field_conjunct.insert(slot_id);
             }
             continue;
         }
@@ -683,7 +700,7 @@ Status HiveDataSource::_init_scanner(RuntimeState* state) {
 
     scanner_params.conjunct_ctxs_by_slot = _conjunct_ctxs_by_slot;
     scanner_params.slots_in_conjunct = _slots_in_conjunct;
-    scanner_params.slots_of_mutli_slot_conjunct = _slots_of_mutli_slot_conjunct;
+    scanner_params.slots_of_multi_field_conjunct = _slots_of_multi_field_conjunct;
     scanner_params.min_max_conjunct_ctxs = _min_max_conjunct_ctxs;
     scanner_params.min_max_tuple_desc = _min_max_tuple_desc;
     scanner_params.hive_column_names = &_hive_column_names;

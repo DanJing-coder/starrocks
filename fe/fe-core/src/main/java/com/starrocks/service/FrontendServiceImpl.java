@@ -84,6 +84,7 @@ import com.starrocks.catalog.system.sys.SysFeLocks;
 import com.starrocks.catalog.system.sys.SysFeMemoryUsage;
 import com.starrocks.catalog.system.sys.SysObjectDependencies;
 import com.starrocks.cluster.ClusterNamespace;
+import com.starrocks.common.AlreadyExistsException;
 import com.starrocks.common.AnalysisException;
 import com.starrocks.common.CaseSensibility;
 import com.starrocks.common.Config;
@@ -360,6 +361,8 @@ import com.starrocks.thrift.TUpdateFailPointRequest;
 import com.starrocks.thrift.TUpdateFailPointResponse;
 import com.starrocks.thrift.TUpdateResourceUsageRequest;
 import com.starrocks.thrift.TUpdateResourceUsageResponse;
+import com.starrocks.thrift.TUpdateTabletVersionRequest;
+import com.starrocks.thrift.TUpdateTabletVersionResult;
 import com.starrocks.thrift.TUserPrivDesc;
 import com.starrocks.thrift.TVerboseVariableRecord;
 import com.starrocks.thrift.TWarehouseInfo;
@@ -1796,8 +1799,11 @@ public class FrontendServiceImpl implements FrontendService.Iface {
 
             Coordinator coord = getCoordinatorFactory().createSyncStreamLoadScheduler(planner, getClientAddr());
             streamLoadTask.setCoordinator(coord);
-
-            QeProcessorImpl.INSTANCE.registerQuery(streamLoadInfo.getId(), coord);
+            try {
+                QeProcessorImpl.INSTANCE.registerQuery(streamLoadInfo.getId(), coord);
+            } catch (AlreadyExistsException e) {
+                LOG.info("receive duplicate stream load put request: {}", request.getLoadId());
+            }
 
             plan.query_options.setLoad_job_type(TLoadJobType.STREAM_LOAD);
             // add table indexes to transaction state
@@ -3318,6 +3324,11 @@ public class FrontendServiceImpl implements FrontendService.Iface {
         return response;
     }
 
+    @Override
+    public TUpdateTabletVersionResult updateTabletVersion(TUpdateTabletVersionRequest request) {
+        return leaderImpl.updateTabletVersion(request);
+    }
+
     @NotNull
     private static TConnectionInfo getTConnectionInfo(List<String> row) {
         TConnectionInfo tConnectionInfo = new TConnectionInfo();
@@ -3331,6 +3342,7 @@ public class FrontendServiceImpl implements FrontendService.Iface {
         tConnectionInfo.setState(row.get(7));
         tConnectionInfo.setInfo(row.get(8));
         tConnectionInfo.setIsPending(row.get(9));
+        tConnectionInfo.setWarehouse(row.get(10));
         return tConnectionInfo;
     }
 }

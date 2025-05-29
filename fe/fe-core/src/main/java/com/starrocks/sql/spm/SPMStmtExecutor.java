@@ -27,7 +27,7 @@ import java.util.List;
 import java.util.stream.Stream;
 
 public class SPMStmtExecutor {
-    public static void execute(ConnectContext context, CreateBaselinePlanStmt stmt) {
+    public static BaselinePlan execute(ConnectContext context, CreateBaselinePlanStmt stmt) {
         SPMPlanBuilder builder = new SPMPlanBuilder(context, stmt);
         BaselinePlan plan = builder.execute();
         plan.setEnable(true);
@@ -38,15 +38,17 @@ public class SPMStmtExecutor {
         } else {
             context.getSqlPlanStorage().storeBaselinePlan(List.of(plan));
         }
+        return plan;
     }
 
     public static void execute(ConnectContext context, DropBaselinePlanStmt stmt) {
+        context.getSqlPlanStorage().dropBaselinePlan(stmt.getBaseLineId());
         context.getGlobalStateMgr().getSqlPlanStorage().dropBaselinePlan(stmt.getBaseLineId());
     }
 
     public static ShowResultSet execute(ConnectContext context, ShowBaselinePlanStmt stmt) {
-        List<BaselinePlan> baselines1 = context.getSqlPlanStorage().getAllBaselines();
-        List<BaselinePlan> baselines2 = context.getGlobalStateMgr().getSqlPlanStorage().getAllBaselines();
+        List<BaselinePlan> baselines1 = context.getSqlPlanStorage().getBaselines(stmt.getWhere());
+        List<BaselinePlan> baselines2 = context.getGlobalStateMgr().getSqlPlanStorage().getBaselines(stmt.getWhere());
         List<List<String>> rows = Lists.newArrayList();
 
         Stream.concat(baselines1.stream(), baselines2.stream()).forEach(baseline -> {

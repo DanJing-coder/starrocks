@@ -556,6 +556,7 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
+import static com.starrocks.catalog.FunctionSet.ARRAY_AGG_DISTINCT;
 import static com.starrocks.sql.ast.IndexDef.IndexType.getIndexType;
 import static com.starrocks.sql.common.ErrorMsgProxy.PARSER_ERROR_MSG;
 import static java.lang.String.format;
@@ -1155,7 +1156,12 @@ public class AstBuilder extends StarRocksBaseVisitor<ParseNode> {
             } else if (defaultDescContext.NULL() != null) {
                 defaultValueDef = ColumnDef.DefaultValueDef.NULL_DEFAULT_VALUE;
             } else if (defaultDescContext.CURRENT_TIMESTAMP() != null) {
-                defaultValueDef = ColumnDef.DefaultValueDef.CURRENT_TIMESTAMP_VALUE;
+                List<Expr> expr = Lists.newArrayList();
+                if (defaultDescContext.INTEGER_VALUE() != null) {
+                    expr.add(new IntLiteral(Long.parseLong(defaultDescContext.INTEGER_VALUE().getText()), Type.INT));
+                }
+                defaultValueDef = new ColumnDef.DefaultValueDef(true, (expr.size() == 1),
+                        new FunctionCallExpr("current_timestamp", expr));
             } else if (defaultDescContext.qualifiedName() != null) {
                 String functionName = defaultDescContext.qualifiedName().getText().toLowerCase();
                 defaultValueDef = new ColumnDef.DefaultValueDef(true,
@@ -7526,10 +7532,35 @@ public class AstBuilder extends StarRocksBaseVisitor<ParseNode> {
         if (CollectionUtils.isNotEmpty(orderByElements)) {
             orderByElements.stream().forEach(e -> exprs.add(e.getExpr()));
         }
-        FunctionCallExpr functionCallExpr = new FunctionCallExpr(functionName,
-                context.aggregationFunction().ASTERISK_SYMBOL() == null ?
-                        new FunctionParams(isDistinct, exprs, orderByElements) :
-                        FunctionParams.createStarParam(), pos);
+
+        FunctionCallExpr functionCallExpr;
+        boolean isStar = context.aggregationFunction().ASTERISK_SYMBOL() != null;
+        if (context.filter() == null) {
+            functionCallExpr = new FunctionCallExpr(functionName,
+                    isStar ? FunctionParams.createStarParam() : new FunctionParams(isDistinct, exprs, orderByElements),
+                    pos);
+
+        } else {
+            // convert agg filter to agg_if
+            boolean isCountFunc = functionName.equalsIgnoreCase(FunctionSet.COUNT);
+            if (isCountFunc && isDistinct) {
+                throw new ParsingException("Aggregation filter does not support COUNT DISTINCT");
+            }
+            Expr booleanExpr = (Expr) visit(context.filter().booleanExpression());
+            functionName = functionName + FunctionSet.AGG_STATE_IF_SUFFIX;
+            exprs.add(booleanExpr);
+
+            if (isCountFunc && isStar) {
+                functionCallExpr = new FunctionCallExpr(functionName, new FunctionParams(false, exprs, null, isDistinct, null));
+            } else if (functionName.startsWith(FunctionSet.ARRAY_AGG) && isDistinct) {
+                functionName = ARRAY_AGG_DISTINCT + FunctionSet.AGG_STATE_IF_SUFFIX;
+                functionCallExpr = new FunctionCallExpr(functionName, new FunctionParams(false, exprs, orderByElements), pos);
+            } else {
+                functionCallExpr = new FunctionCallExpr(functionName,
+                        isStar ? FunctionParams.createStarParam() : new FunctionParams(isDistinct, exprs, orderByElements),
+                        pos);
+            }
+        }
 
         functionCallExpr = SyntaxSugars.parse(functionCallExpr);
         functionCallExpr.setHints(hints);
@@ -8572,7 +8603,11 @@ public class AstBuilder extends StarRocksBaseVisitor<ParseNode> {
 
     @Override
     public ParseNode visitShowBaselinePlanStatement(StarRocksParser.ShowBaselinePlanStatementContext ctx) {
-        return new ShowBaselinePlanStmt(createPos(ctx));
+        Expr where = null;
+        if (ctx.WHERE() != null) {
+            where = (Expr) visit(ctx.expression());
+        }
+        return new ShowBaselinePlanStmt(createPos(ctx), where);
     }
 
     @Override

@@ -17,6 +17,7 @@ package com.starrocks.scheduler.mv;
 import com.google.common.base.Strings;
 import com.google.common.collect.Sets;
 import com.starrocks.analysis.Expr;
+import com.starrocks.analysis.TableName;
 import com.starrocks.catalog.Column;
 import com.starrocks.catalog.Database;
 import com.starrocks.catalog.MaterializedView;
@@ -56,6 +57,8 @@ import static com.starrocks.sql.optimizer.rule.transformation.partition.Partitio
  * refresh.
  */
 public abstract class MVPCTRefreshPartitioner {
+    protected  static final int CREATE_PARTITION_BATCH_SIZE = 64;
+
     protected final MvTaskRunContext mvContext;
     protected final TaskRunContext context;
     protected final Database db;
@@ -93,6 +96,16 @@ public abstract class MVPCTRefreshPartitioner {
                                                     List<Expr> mvPartitionSlotRefs) throws AnalysisException;
 
     /**
+     * Generate partition predicate for mv refresh based on the mv partition names.
+     * @param tableName: materialized view table name(db + name)
+     * @param mvPartitionNames: materialized view partition names to check.
+     * @return : partition predicate for mv refresh.
+     * @throws AnalysisException
+     */
+    public abstract Expr generateMVPartitionPredicate(TableName tableName,
+                                                      Set<String> mvPartitionNames) throws AnalysisException;
+
+    /**
      * Get mv partitions to refresh based on the ref base table partitions.
      *
      * @param mvPartitionInfo:           mv partition info to check.
@@ -128,6 +141,10 @@ public abstract class MVPCTRefreshPartitioner {
      * @param tentative                 see {@link com.starrocks.scheduler.PartitionBasedMvRefreshProcessor}
      */
     public abstract void filterPartitionByRefreshNumber(Set<String> mvPartitionsToRefresh,
+                                                        Set<String> mvPotentialPartitionNames,
+                                                        boolean tentative);
+
+    public abstract void filterPartitionByAdaptiveRefreshNumber(Set<String> mvPartitionsToRefresh,
                                                         Set<String> mvPotentialPartitionNames,
                                                         boolean tentative);
 
