@@ -50,6 +50,8 @@ import com.starrocks.common.util.OrderByPair;
 import com.starrocks.common.util.concurrent.lock.LockType;
 import com.starrocks.common.util.concurrent.lock.Locker;
 import com.starrocks.qe.ConnectContext;
+import com.starrocks.qe.ShowResultMetaFactory;
+import com.starrocks.qe.ShowResultSetMetaData;
 import com.starrocks.server.CatalogMgr;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.ShowTemporaryTableStmt;
@@ -85,6 +87,7 @@ import com.starrocks.sql.ast.ShowTableStatusStmt;
 import com.starrocks.sql.ast.ShowTableStmt;
 import com.starrocks.sql.ast.ShowTabletStmt;
 import com.starrocks.sql.ast.ShowTransactionStmt;
+import com.starrocks.sql.ast.spm.ShowBaselinePlanStmt;
 import com.starrocks.sql.common.MetaUtils;
 import org.apache.commons.lang.StringUtils;
 import org.slf4j.Logger;
@@ -654,8 +657,7 @@ public class ShowStmtAnalyzer {
             if (subExpr == null) {
                 return;
             }
-            if (subExpr instanceof CompoundPredicate) {
-                CompoundPredicate cp = (CompoundPredicate) subExpr;
+            if (subExpr instanceof CompoundPredicate cp) {
                 if (cp.getOp() != CompoundPredicate.Operator.AND) {
                     throw new SemanticException("Only allow compound predicate with operator AND");
                 }
@@ -782,7 +784,23 @@ public class ShowStmtAnalyzer {
             return null;
         }
 
+        @Override
+        public Void visitShowBaselinePlanStatement(ShowBaselinePlanStmt statement, ConnectContext context) {
+            if (statement.getWhere() != null) {
+                // check where columns
+                ExpressionAnalyzer.analyzeExpressionResolveSlot(statement.getWhere(), context, slotRef -> {
+                    if (!ShowBaselinePlanStmt.BASELINE_FIELD_META.containsKey(slotRef.getColumnName().toLowerCase())) {
+                        throw new SemanticException("Where clause : " + slotRef.getColumnName() + " is not supported.");
+                    }
+                    slotRef.setType(
+                            ShowBaselinePlanStmt.BASELINE_FIELD_META.get(slotRef.getColumnName().toLowerCase()));
+                });
+            }
+            return null;
+        }
+
         public void analyzeOrderByItems(ShowStmt node) {
+            ShowResultSetMetaData metaData = new ShowResultMetaFactory().getMetadata(node);
             List<OrderByElement> orderByElements = node.getOrderByElements();
             if (orderByElements != null && !orderByElements.isEmpty()) {
                 List<OrderByPair> orderByPairs = new ArrayList<>();
@@ -791,7 +809,7 @@ public class ShowStmtAnalyzer {
                         ErrorReport.reportSemanticException(ErrorCode.ERR_COMMON_ERROR, "Should order by column");
                     }
                     SlotRef slotRef = (SlotRef) orderByElement.getExpr();
-                    int index = node.getMetaData().getColumnIdx(slotRef.getColumnName());
+                    int index = metaData.getColumnIdx(slotRef.getColumnName());
                     OrderByPair orderByPair = new OrderByPair(index, !orderByElement.getIsAsc());
                     orderByPairs.add(orderByPair);
                 }

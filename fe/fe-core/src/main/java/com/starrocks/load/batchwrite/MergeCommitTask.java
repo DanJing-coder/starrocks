@@ -21,6 +21,7 @@ import com.starrocks.authorization.PrivilegeBuiltinConstants;
 import com.starrocks.catalog.Database;
 import com.starrocks.catalog.OlapTable;
 import com.starrocks.catalog.Table;
+import com.starrocks.catalog.UserIdentity;
 import com.starrocks.common.Config;
 import com.starrocks.common.LoadException;
 import com.starrocks.common.Pair;
@@ -41,7 +42,6 @@ import com.starrocks.qe.QeProcessorImpl;
 import com.starrocks.qe.scheduler.Coordinator;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.LoadPlanner;
-import com.starrocks.sql.ast.UserIdentity;
 import com.starrocks.task.LoadEtlTask;
 import com.starrocks.thrift.TEtlState;
 import com.starrocks.thrift.TUniqueId;
@@ -175,7 +175,7 @@ public class MergeCommitTask implements Runnable {
                 pair.first.getId(), Lists.newArrayList(pair.second.getId()), label,
                 TransactionState.TxnCoordinator.fromThisFE(),
                 TransactionState.LoadJobSourceType.FRONTEND_STREAMING,
-                streamLoadInfo.getTimeout(), streamLoadInfo.getWarehouseId());
+                streamLoadInfo.getTimeout(), streamLoadInfo.getComputeResource());
     }
 
     private void commitAndPublishTxn() throws Exception {
@@ -212,6 +212,7 @@ public class MergeCommitTask implements Runnable {
             context.setCurrentUserIdentity(UserIdentity.ROOT);
             context.setCurrentRoleIds(Sets.newHashSet(PrivilegeBuiltinConstants.ROOT_ROLE_ID));
             context.setQualifiedUser(UserIdentity.ROOT.getUser());
+            context.setCurrentComputeResource(streamLoadInfo.getComputeResource());
             context.setThreadLocalInfo();
 
             Pair<Database, OlapTable> pair = getDbAndTable();
@@ -235,7 +236,6 @@ public class MergeCommitTask implements Runnable {
                     streamLoadInfo.getLoadMemLimit(), streamLoadInfo.getExecMemLimit(),
                     streamLoadInfo.getNegative(), coordinatorBackendIds.size(), streamLoadInfo.getColumnExprDescs(),
                     streamLoadInfo, label, streamLoadInfo.getTimeout());
-            loadPlanner.setWarehouseId(streamLoadInfo.getWarehouseId());
             loadPlanner.setBatchWrite(batchWriteIntervalMs,
                     ImmutableMap.<String, String>builder()
                             .putAll(loadParameters.toMap()).build(), coordinatorBackendIds);
@@ -296,6 +296,7 @@ public class MergeCommitTask implements Runnable {
             }
         } finally {
             QeProcessorImpl.INSTANCE.unregisterQuery(loadId);
+            ConnectContext.remove();
         }
     }
 

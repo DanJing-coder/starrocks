@@ -35,6 +35,11 @@ Status LimitOperator::push_chunk(RuntimeState* state, const ChunkPtr& chunk) {
     } while (num_consume_rows && !_limit.compare_exchange_strong(old_limit, old_limit - num_consume_rows));
 
     if (num_consume_rows != chunk->num_rows()) {
+        // In case of multi cast exchange chunks could be used in multiple pipelines with different limits and should
+        // not be updated in place.
+        if (!_limit_chunk_in_place) {
+            _cur_chunk = chunk->clone_unique();
+        }
         _cur_chunk->set_num_rows(num_consume_rows);
     }
 
@@ -44,15 +49,15 @@ Status LimitOperator::push_chunk(RuntimeState* state, const ChunkPtr& chunk) {
 void LimitOperator::update_exec_stats(RuntimeState* state) {
     auto ctx = state->query_ctx();
     if (!_is_subordinate && ctx != nullptr) {
-        ctx->force_set_pull_rows_stats(_plan_node_id, _pull_row_num_counter->value());
+        ctx->force_set_pull_rows_stats(_plan_node_id, COUNTER_VALUE(_pull_row_num_counter));
         if (_conjuncts_input_counter != nullptr && _conjuncts_output_counter != nullptr) {
-            ctx->update_pred_filter_stats(_plan_node_id,
-                                          _conjuncts_input_counter->value() - _conjuncts_output_counter->value());
+            ctx->update_pred_filter_stats(
+                    _plan_node_id, COUNTER_VALUE(_conjuncts_input_counter) - COUNTER_VALUE(_conjuncts_output_counter));
         }
 
         if (_bloom_filter_eval_context.join_runtime_filter_input_counter != nullptr) {
-            int64_t input_rows = _bloom_filter_eval_context.join_runtime_filter_input_counter->value();
-            int64_t output_rows = _bloom_filter_eval_context.join_runtime_filter_output_counter->value();
+            int64_t input_rows = COUNTER_VALUE(_bloom_filter_eval_context.join_runtime_filter_input_counter);
+            int64_t output_rows = COUNTER_VALUE(_bloom_filter_eval_context.join_runtime_filter_output_counter);
             ctx->update_rf_filter_stats(_plan_node_id, input_rows - output_rows);
         }
     }

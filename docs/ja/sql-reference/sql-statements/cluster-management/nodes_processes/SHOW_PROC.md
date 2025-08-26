@@ -8,6 +8,15 @@ displayed_sidebar: docs
 
 StarRocks クラスターの特定の指標を表示します。
 
+SHOW PROC は Linux の `/proc` ファイルシステムに相当する。`/proc` のパスと同様に、SHOW PROC のパラメータはツリーのような階層構造になっており、それぞれの階層で異なる情報が表示される。`SHOW PROC '/dbs'` を例にとってみよう：
+- `SHOW PROC '/dbs'` はクラスタ内のすべてのデータベースの情報を返す。
+- `SHOW PROC '/dbs/<db_name>'` は指定したデータベースの情報を返す。
+- `SHOW PROC '/dbs/<db_name>/tables'` は指定したデータベースの全てのテーブルの情報を返す。
+- `SHOW PROC '/dbs/<db_name>/<table_name>'` は指定したテーブルの情報を返す。
+- `SHOW PROC '/dbs/<db_name>/<table_name>/partitions'` は指定したテーブルのすべてのパーティションの情報を返す。
+
+SHOW PROC のパラメータはリーフノードまで指定できます。
+
 :::tip
 
 この操作には SYSTEM レベルの OPERATE 権限が必要です。この権限を付与するには、 [GRANT](../../account-management/GRANT.md) の指示に従ってください。
@@ -117,17 +126,32 @@ ClusterDecommissioned: false
 例 2: クラスター内のデータベースの情報を表示します。
 
 ```Plain
-mysql> SHOW PROC '/dbs';
-+---------+------------------------+----------+----------------+--------------------------+---------------------+
-| DbId    | DbName                 | TableNum | Quota          | LastConsistencyCheckTime | ReplicaQuota        |
-+---------+------------------------+----------+----------------+--------------------------+---------------------+
-| 1       | information_schema     | 22       | 8388608.000 TB | NULL                     | 9223372036854775807 |
-| 840997  | tpcds_100g             | 25       | 1024.000 GB    | NULL                     | 1073741824          |
-| 1275196 | _statistics_           | 3        | 8388608.000 TB | 2022-09-06 23:00:58      | 9223372036854775807 |
-| 1286207 | tpcds_n                | 24       | 8388608.000 TB | NULL                     | 9223372036854775807 |
-| 1381289 | test                   | 6        | 8388608.000 TB | 2022-01-14 23:10:18      | 9223372036854775807 |
-| 6186781 | test_stddev            | 1        | 8388608.000 TB | 2022-09-06 23:00:58      | 9223372036854775807 |
-+---------+------------------------+----------+----------------+--------------------------+---------------------+
+mysql> show proc "/dbs";
++-------+--------------------+----------+----------------+--------------------------+---------------------+
+| DbId  | DbName             | TableNum | Quota          | LastConsistencyCheckTime | ReplicaQuota        |
++-------+--------------------+----------+----------------+--------------------------+---------------------+
+| 1     | information_schema | 54       | 8388608.000 TB | NULL                     | 9223372036854775807 |
+| 100   | sys                | 6        | 8388608.000 TB | NULL                     | 9223372036854775807 |
+| 10001 | _statistics_       | 12       | 8388608.000 TB | NULL                     | 9223372036854775807 |
+| 10015 | test               | 1        | 8388608.000 TB | NULL                     | 9223372036854775807 |
++-------+--------------------+----------+----------------+--------------------------+---------------------+
+4 rows in set (0.00 sec)
+mysql> show proc "/dbs/test";
++---------+------------------+----------+---------------------+--------------+--------+--------------+--------------------------+--------------+---------------+--------------------------------------------------------------------------------------------------------+
+| TableId | TableName        | IndexNum | PartitionColumnName | PartitionNum | State  | Type         | LastConsistencyCheckTime | ReplicaCount | PartitionType | StoragePath                                                                                            |
++---------+------------------+----------+---------------------+--------------+--------+--------------+--------------------------+--------------+---------------+--------------------------------------------------------------------------------------------------------+
+| 10207   | source_wiki_edit | 1        | event_time          | 4            | NORMAL | CLOUD_NATIVE | NULL                     | 8            | RANGE         | s3://test/xxx                                                                                          |
++---------+------------------+----------+---------------------+--------------+--------+--------------+--------------------------+--------------+---------------+--------------------------------------------------------------------------------------------------------+
+1 row in set (0.00 sec)
+mysql> show proc "/dbs/test/source_wiki_edit";
++-----------------+
+| Nodes           |
++-----------------+
+| partitions      |
+| temp_partitions |
+| index_schema    |
++-----------------+
+3 rows in set (0.00 sec)
 ```
 
 | **戻り値**               | **説明**                                   |
@@ -138,6 +162,19 @@ mysql> SHOW PROC '/dbs';
 | Quota                    | データベースのストレージクォータ。                    |
 | LastConsistencyCheckTime | 一貫性チェックが最後に実行された時刻。 |
 | ReplicaQuota             | データベースのデータレプリカクォータ。               |
+| TableId                  | テーブル ID。                                         |
+| TableName                | テーブル名。                                       |
+| PartitionColumnName      | パーティションカラム名。                            |
+| PartitionNum             | テーブルのパーティション数。                |
+| State                    | テーブルの状態。                               |
+| Type                     | テーブルのタイプ。                               |
+| LastConsistencyCheckTime | 最後に一致性チェックが実行された時刻。 |
+| ReplicaCount             | テーブルのレプリカ数。                |
+| PartitionType            | テーブルのパーティションの種類。             |
+| StoragePath              | テーブルのストレージパス。                       |
+| partitions               | テーブルのパーティション。                         |
+| temp_partitions          | テーブルの一時パーティション。                |
+| index_schema             | テーブルの同期マテリアライズドビュー。      |
 
 例 3: クラスター内のジョブの情報を表示します。
 
@@ -382,6 +419,7 @@ mysql> SHOW PROC '/cluster_balance';
 +-------------------+--------+
 | Item              | Number |
 +-------------------+--------+
+| balance_stat      | 1      |
 | cluster_load_stat | 1      |
 | working_slots     | 3      |
 | sched_stat        | 1      |
@@ -394,8 +432,30 @@ mysql> SHOW PROC '/cluster_balance';
 
 | **戻り値** | **説明**                                  |
 | ---------- | ------------------------------------------------ |
-| Item       | `cluster_balance` のサブコマンド項目。 <ul><li>cluster_load_stat: クラスターの現在の負荷状況。</li><li>working_slots: 現在利用可能な作業スロットの数。</li><li>sched_stat: スケジューラの現在の状態。</li><li>priority_repair: 優先されるタブレット修復タスクの数。</li><li>pending_tablets: 処理待ちのタブレットの数。</li><li>running_tablets: 現在修復中のタブレットの数。</li><li>history_tablets: 過去に修復されたタブレットの総数。</li></ul>         |
+| Item       | `cluster_balance` のサブコマンド項目。 <ul><li>balance_stat: クラスターの現在のバランス状態。</li><li>cluster_load_stat: クラスターの現在の負荷状況。</li><li>working_slots: 現在利用可能な作業スロットの数。</li><li>sched_stat: スケジューラの現在の状態。</li><li>priority_repair: 優先されるタブレット修復タスクの数。</li><li>pending_tablets: 処理待ちのタブレットの数。</li><li>running_tablets: 現在修復中のタブレットの数。</li><li>history_tablets: 過去に修復されたタブレットの総数。</li></ul>         |
 | Number     | `cluster_balance` の各サブコマンドの数。 |
+
+```Plain
+mysql> SHOW PROC '/cluster_balance/balance_stat';
++---------------+--------------------------------+----------+----------------+----------------+
+| StorageMedium | BalanceType                    | Balanced | PendingTablets | RunningTablets |
++---------------+--------------------------------+----------+----------------+----------------+
+| HDD           | inter-node disk usage          | true     | 0              | 0              |
+| HDD           | inter-node tablet distribution | true     | 0              | 0              |
+| HDD           | intra-node disk usage          | true     | 0              | 0              |
+| HDD           | intra-node tablet distribution | true     | 0              | 0              |
+| HDD           | colocation group               | true     | 0              | 0              |
+| HDD           | label-aware location           | true     | 0              | 0              |
++---------------+--------------------------------+----------+----------------+----------------+
+```
+
+| **戻り値**      | **説明**                                  |
+| -------------- | ------------------------------------------- |
+| StorageMedium  | ストレージメディア。                           |
+| BalanceType    | バランス状態の種類。                           |
+| Balanced       | バランス状態が達成されているかどうか。            |
+| PendingTablets | タスク状態が「Pending」の Tablet の数。         | 
+| RunningTablets | タスク状態が「Running」の Tablet の数。        |
 
 例 12: クラスター内の Colocate Join グループの情報を表示します。
 

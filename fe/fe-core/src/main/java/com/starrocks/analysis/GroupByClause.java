@@ -40,6 +40,7 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.Table;
 import com.starrocks.common.AnalysisException;
 import com.starrocks.sql.ast.AstVisitor;
+import com.starrocks.sql.ast.ParseNode;
 import com.starrocks.sql.parser.NodePosition;
 import org.apache.commons.collections.CollectionUtils;
 import org.apache.logging.log4j.LogManager;
@@ -193,10 +194,6 @@ public class GroupByClause implements ParseNode {
             }
         }
         exprGenerated = true;
-    }
-
-    @Override
-    public void analyze(Analyzer analyzer) throws AnalysisException {
     }
 
     @Override

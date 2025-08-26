@@ -85,11 +85,11 @@ import com.starrocks.load.loadv2.etl.EtlJobConfig;
 import com.starrocks.metric.TableMetricsEntity;
 import com.starrocks.metric.TableMetricsRegistry;
 import com.starrocks.qe.ConnectContext;
-import com.starrocks.qe.OriginStatement;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.server.WarehouseManager;
 import com.starrocks.service.FrontendOptions;
 import com.starrocks.sql.ast.LoadStmt;
+import com.starrocks.sql.ast.OriginStatement;
 import com.starrocks.sql.ast.ResourceDesc;
 import com.starrocks.system.Backend;
 import com.starrocks.system.ComputeNode;
@@ -190,7 +190,8 @@ public class SparkLoadJob extends BulkLoadJob {
         jobType = EtlJobType.SPARK;
     }
 
-    public SparkLoadJob(long dbId, String label, ResourceDesc resourceDesc, OriginStatement originStmt, ConnectContext context)
+    public SparkLoadJob(long dbId, String label, ResourceDesc resourceDesc, OriginStatement originStmt,
+                        ConnectContext context)
             throws MetaNotFoundException {
         this(dbId, label, resourceDesc, originStmt);
         if (context != null) {
@@ -242,7 +243,7 @@ public class SparkLoadJob extends BulkLoadJob {
         transactionId = GlobalStateMgr.getCurrentState().getGlobalTransactionMgr()
                 .beginTransaction(dbId, Lists.newArrayList(fileGroupAggInfo.getAllTableIds()), label, null,
                         new TxnCoordinator(TxnSourceType.FE, FrontendOptions.getLocalHostAddress()),
-                        LoadJobSourceType.FRONTEND, id, timeoutSecond, warehouseId);
+                        LoadJobSourceType.FRONTEND, id, timeoutSecond, computeResource);
     }
 
     @Override
@@ -479,6 +480,7 @@ public class SparkLoadJob extends BulkLoadJob {
             throw new MetaNotFoundException(errMsg);
         }
 
+        final WarehouseManager warehouseManager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
         AgentBatchTask batchTask = new AgentBatchTask();
         boolean hasLoadPartitions = false;
         Set<Long> totalTablets = Sets.newHashSet();
@@ -499,7 +501,7 @@ public class SparkLoadJob extends BulkLoadJob {
                 for (Map.Entry<Long, Set<Long>> entry : tableToLoadPartitions.entrySet()) {
                     long tableId = entry.getKey();
                     OlapTable table = (OlapTable) GlobalStateMgr.getCurrentState().getLocalMetastore()
-                                .getTable(db.getId(), tableId);
+                            .getTable(db.getId(), tableId);
                     if (table == null) {
                         LOG.warn("table does not exist. id: {}", tableId);
                         continue;
@@ -566,9 +568,8 @@ public class SparkLoadJob extends BulkLoadJob {
 
                                 } else {
                                     // lake tablet
-                                    WarehouseManager warehouseManager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
-                                    ComputeNode backend = warehouseManager
-                                            .getComputeNodeAssignedToTablet(warehouseId, (LakeTablet) tablet);
+                                    ComputeNode backend = warehouseManager.getComputeNodeAssignedToTablet(computeResource,
+                                            tablet.getId());
                                     if (backend == null) {
                                         LOG.warn("replica {} not exists", ((LakeTablet) tablet).getShardId());
                                         continue;

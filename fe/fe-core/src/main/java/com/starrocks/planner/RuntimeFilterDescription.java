@@ -18,8 +18,10 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.starrocks.analysis.Expr;
 import com.starrocks.analysis.SortInfo;
+import com.starrocks.connector.BucketProperty;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.SessionVariable;
+import com.starrocks.thrift.TBucketProperty;
 import com.starrocks.thrift.TNetworkAddress;
 import com.starrocks.thrift.TRuntimeFilterBuildJoinMode;
 import com.starrocks.thrift.TRuntimeFilterBuildType;
@@ -50,7 +52,16 @@ import static com.starrocks.planner.JoinNode.DistributionMode.SHUFFLE_HASH_BUCKE
 public class RuntimeFilterDescription {
     public enum RuntimeFilterType {
         TOPN_FILTER,
-        JOIN_FILTER
+        JOIN_FILTER,
+        AGG_IN_FILTER;
+
+        public boolean isTopNFilter() {
+            return TOPN_FILTER.equals(this);
+        }
+
+        public boolean isAggInFilter() {
+            return AGG_IN_FILTER.equals(this);
+        }
     }
 
     private int filterId;
@@ -74,6 +85,7 @@ public class RuntimeFilterDescription {
     private long buildCardinality;
     private SessionVariable sessionVariable;
 
+    // TODO: remove me
     private boolean onlyLocal;
 
     private long topn;
@@ -95,6 +107,7 @@ public class RuntimeFilterDescription {
     private List<Integer> bucketSeqToInstance = Lists.newArrayList();
     private List<Integer> bucketSeqToDriverSeq = Lists.newArrayList();
     private List<Integer> bucketSeqToPartition = Lists.newArrayList();
+    private List<BucketProperty> bucketProperties = Lists.newArrayList();
     // partitionByExprs are used for computing partition ids in probe side when
     // join's equal conjuncts size > 1.
     private final Map<Integer, List<Expr>> nodeIdToParitionByExprs = Maps.newHashMap();
@@ -150,10 +163,6 @@ public class RuntimeFilterDescription {
         this.type = type;
     }
 
-    public SortInfo getSortInfo() {
-        return sortInfo;
-    }
-
     public void setSortInfo(SortInfo sortInfo) {
         this.sortInfo = sortInfo;
     }
@@ -166,7 +175,7 @@ public class RuntimeFilterDescription {
         return this.topn;
     }
 
-        public PlanNode getBuildPlanNode() {
+    public PlanNode getBuildPlanNode() {
         return buildPlanNode;
     }
 
@@ -215,7 +224,7 @@ public class RuntimeFilterDescription {
             return false;
         }
 
-        if (RuntimeFilterType.TOPN_FILTER.equals(runtimeFilterType()) && node instanceof OlapScanNode) {
+        if (runtimeFilterType().isTopNFilter() && node instanceof OlapScanNode) {
             ((OlapScanNode) node).setOrderHint(isAscFilter());
         }
         // if we don't across exchange node, that's to say this is in local fragment instance.
@@ -250,7 +259,7 @@ public class RuntimeFilterDescription {
 
     // return true if Node could accept the Filter
     public boolean canAcceptFilter(PlanNode node, RuntimeFilterPushDownContext rfPushCtx) {
-        if (RuntimeFilterType.TOPN_FILTER.equals(runtimeFilterType())) {
+        if (runtimeFilterType().isTopNFilter() || runtimeFilterType().isAggInFilter()) {
             if (node instanceof ScanNode) {
                 ScanNode scanNode = (ScanNode) node;
                 return scanNode.supportTopNRuntimeFilter();
@@ -269,17 +278,17 @@ public class RuntimeFilterDescription {
         return true;
     }
 
-    public boolean isNullLast() {
-        if (sortInfo != null) {
-            return !sortInfo.getNullsFirst().get(0);
-        } else {
-            return false;
-        }
-    }
-
     public boolean isAscFilter() {
         if (sortInfo != null) {
             return sortInfo.getIsAscOrder().get(0);
+        } else {
+            return true;
+        }
+    }
+
+    public boolean isNullsFirst() {
+        if (sortInfo != null) {
+            return sortInfo.getNullsFirst().get(0);
         } else {
             return true;
         }
@@ -385,6 +394,10 @@ public class RuntimeFilterDescription {
 
     public void setBucketSeqToPartition(List<Integer> bucketSeqToPartition) {
         this.bucketSeqToPartition = bucketSeqToPartition;
+    }
+
+    public void setBucketProperties(List<BucketProperty> bucketProperties) {
+        this.bucketProperties = bucketProperties;
     }
 
     public List<Integer> getBucketSeqToInstance() {
@@ -560,6 +573,13 @@ public class RuntimeFilterDescription {
         if (bucketSeqToPartition != null && !bucketSeqToPartition.isEmpty()) {
             layout.setBucketseq_to_partition(bucketSeqToPartition);
         }
+        if (bucketProperties != null && !bucketProperties.isEmpty()) {
+            List<TBucketProperty> tBucketProperties = new ArrayList<>();
+            for (BucketProperty bucketProperty : bucketProperties) {
+                tBucketProperties.add(bucketProperty.toThrift());
+            }
+            layout.setBucket_properties(tBucketProperties);
+        }
         return layout;
     }
 
@@ -617,8 +637,10 @@ public class RuntimeFilterDescription {
 
         t.setBuild_from_group_execution(isBuildFromColocateGroup);
 
-        if (RuntimeFilterType.TOPN_FILTER.equals(runtimeFilterType())) {
+        if (runtimeFilterType().isTopNFilter()) {
             t.setFilter_type(TRuntimeFilterBuildType.TOPN_FILTER);
+        } else if (runtimeFilterType().isAggInFilter()) {
+            t.setFilter_type(TRuntimeFilterBuildType.AGG_FILTER);
         } else {
             t.setFilter_type(TRuntimeFilterBuildType.JOIN_FILTER);
         }

@@ -84,6 +84,15 @@ public final class GlobalVariable {
 
     public static final String QUERY_HISTORY_LOAD_INTERVAL_SECONDS = "query_history_load_interval_seconds";
 
+    public static final String ENABLE_SPM_CAPTURE = "enable_plan_capture";
+
+    public static final String SPM_CAPTURE_INTERVAL_SECONDS = "plan_capture_interval_seconds";
+
+    public static final String SPM_CAPTURE_INCLUDE_TABLE_PATTERN = "plan_capture_include_pattern";
+
+    public static final String ENABLE_TABLE_NAME_CASE_INSENSITIVE = "enable_table_name_case_insensitive";
+
+
     @VariableMgr.VarAttr(name = VERSION_COMMENT, flag = VariableMgr.READ_ONLY)
     public static String versionComment = Version.STARROCKS_VERSION + "-" + Version.STARROCKS_COMMIT_HASH;
 
@@ -124,6 +133,29 @@ public final class GlobalVariable {
     // Compatible with jdbc that version > 8.0.15
     @VariableMgr.VarAttr(name = "performance_schema", flag = VariableMgr.READ_ONLY)
     private static boolean performanceSchema = false;
+
+    /**
+     * This configuration controls case sensitivity for SQL catalog/database/table names.
+     * When enabled, these database object names are treated as case-insensitive.
+     * IMPORTANT NOTES:
+     * - This setting can ONLY be configured during the initial cluster setup via
+     *   {@link Config#enable_table_name_case_insensitive} on the FE leader node
+     *
+     * - Once set during first initialization, this value is IMMUTABLE and will NOT
+     *   be modified by any subsequent operations including:
+     *   * Cluster upgrades/downgrades
+     *   * Fe node restarts
+     *   * Any other maintenance operations
+     *
+     * - During FE restart or leader failover, if the leader node's
+     *   {@link Config#enable_table_name_case_insensitive} differs from the cluster's initially
+     *   recorded enableTableNameCaseInsensitive value, the leader node will FAIL to start
+     *
+     * - Existing clusters CANNOT modify this value. it can only be configured
+     *   in NEW clusters during initial setup
+     */
+    @VariableMgr.VarAttr(name = ENABLE_TABLE_NAME_CASE_INSENSITIVE, flag = VariableMgr.READ_ONLY)
+    public static boolean enableTableNameCaseInsensitive = false;
 
     /**
      * Query will be pending when BE is overloaded, if `enableQueryQueueXxx` is true.
@@ -192,6 +224,15 @@ public final class GlobalVariable {
 
     @VariableMgr.VarAttr(name = QUERY_HISTORY_LOAD_INTERVAL_SECONDS, flag = VariableMgr.GLOBAL)
     public static long queryHistoryLoadIntervalSeconds = 60 * 15; // 15min
+
+    @VariableMgr.VarAttr(name = ENABLE_SPM_CAPTURE, flag = VariableMgr.GLOBAL)
+    public static boolean enableSPMCapture = false;
+
+    @VariableMgr.VarAttr(name = SPM_CAPTURE_INTERVAL_SECONDS, flag = VariableMgr.GLOBAL)
+    public static long spmCaptureIntervalSeconds = 60 * 60 * 3; // 3 hour
+
+    @VariableMgr.VarAttr(name = SPM_CAPTURE_INCLUDE_TABLE_PATTERN, flag = VariableMgr.GLOBAL)
+    public static String spmCaptureIncludeTablePattern = ".*";
 
     public static boolean isEnableQueryHistory() {
         return enableQueryHistory;

@@ -80,13 +80,6 @@ class RuntimeFilterWorker;
 class RuntimeFilterCache;
 class ProfileReportWorker;
 class QuerySpillManager;
-class BlockCache;
-class ObjectCache;
-class LocalCache;
-class RemoteCache;
-class StoragePageCache;
-class DiskSpaceMonitor;
-struct CacheOptions;
 struct RfTracePoint;
 
 class BackendServiceClient;
@@ -112,6 +105,10 @@ class ReplicationTxnManager;
 } // namespace lake
 namespace spill {
 class DirManager;
+}
+
+namespace connector {
+class ConnectorSinkSpillExecutor;
 }
 
 class GlobalEnv {
@@ -158,7 +155,6 @@ public:
     MemTracker* page_cache_mem_tracker() { return _page_cache_mem_tracker.get(); }
     MemTracker* jit_cache_mem_tracker() { return _jit_cache_mem_tracker.get(); }
     MemTracker* update_mem_tracker() { return _update_mem_tracker.get(); }
-    MemTracker* chunk_allocator_mem_tracker() { return _chunk_allocator_mem_tracker.get(); }
     MemTracker* passthrough_mem_tracker() { return _passthrough_mem_tracker.get(); }
     MemTracker* clone_mem_tracker() { return _clone_mem_tracker.get(); }
     MemTracker* consistency_mem_tracker() { return _consistency_mem_tracker.get(); }
@@ -227,7 +223,6 @@ private:
     // The memory tracker for update manager
     std::shared_ptr<MemTracker> _update_mem_tracker;
 
-    std::shared_ptr<MemTracker> _chunk_allocator_mem_tracker;
     // record mem usage in passthrough
     std::shared_ptr<MemTracker> _passthrough_mem_tracker;
 
@@ -244,48 +239,6 @@ private:
     std::shared_ptr<MemTracker> _poco_connection_pool_mem_tracker;
 
     std::map<MemTrackerType, std::shared_ptr<MemTracker>> _mem_tracker_map;
-};
-
-class CacheEnv {
-public:
-    static CacheEnv* GetInstance();
-
-    Status init(const std::vector<StorePath>& store_paths);
-    void destroy();
-
-    void try_release_resource_before_core_dump();
-
-    void set_local_cache(std::shared_ptr<LocalCache> local_cache) { _local_cache = std::move(local_cache); }
-
-    LocalCache* local_cache() { return _local_cache.get(); }
-    BlockCache* block_cache() const { return _block_cache.get(); }
-    void set_block_cache(std::shared_ptr<BlockCache> block_cache) { _block_cache = std::move(block_cache); }
-    ObjectCache* external_table_meta_cache() const { return _starcache_based_object_cache.get(); }
-    ObjectCache* external_table_page_cache() const { return _starcache_based_object_cache.get(); }
-    StoragePageCache* page_cache() const { return _page_cache.get(); }
-
-    StatusOr<int64_t> get_storage_page_cache_limit();
-    int64_t check_storage_page_cache_limit(int64_t storage_cache_limit);
-
-private:
-    StatusOr<CacheOptions> _init_cache_options();
-    Status _init_datacache();
-    Status _init_starcache_based_object_cache();
-    Status _init_lru_base_object_cache();
-    Status _init_page_cache();
-
-    GlobalEnv* _global_env;
-    std::vector<StorePath> _store_paths;
-
-    std::shared_ptr<LocalCache> _local_cache;
-    std::shared_ptr<RemoteCache> _remote_cache;
-
-    std::shared_ptr<BlockCache> _block_cache;
-    std::shared_ptr<ObjectCache> _starcache_based_object_cache;
-    std::shared_ptr<ObjectCache> _lru_based_object_cache;
-    std::shared_ptr<StoragePageCache> _page_cache;
-
-    std::shared_ptr<DiskSpaceMonitor> _disk_space_monitor;
 };
 
 // Execution environment for queries/plan fragments.
@@ -362,6 +315,8 @@ public:
     RoutineLoadTaskExecutor* routine_load_task_executor() { return _routine_load_task_executor; }
     HeartbeatFlags* heartbeat_flags() { return _heartbeat_flags; }
 
+    connector::ConnectorSinkSpillExecutor* connector_sink_spill_executor() { return _connector_sink_spill_executor; }
+
     ThreadPool* automatic_partition_pool() { return _automatic_partition_pool.get(); }
 
     RuntimeFilterWorker* runtime_filter_worker() { return _runtime_filter_worker; }
@@ -398,6 +353,8 @@ public:
     spill::DirManager* spill_dir_mgr() const { return _spill_dir_mgr.get(); }
 
     ThreadPool* delete_file_thread_pool();
+
+    ThreadPool* put_aggregate_metadata_thread_pool() { return _put_aggregate_metadata_thread_pool.get(); }
 
     void try_release_resource_before_core_dump();
 
@@ -457,6 +414,8 @@ private:
     SmallFileMgr* _small_file_mgr = nullptr;
     HeartbeatFlags* _heartbeat_flags = nullptr;
 
+    connector::ConnectorSinkSpillExecutor* _connector_sink_spill_executor = nullptr;
+
     std::unique_ptr<ThreadPool> _automatic_partition_pool;
 
     RuntimeFilterWorker* _runtime_filter_worker = nullptr;
@@ -468,6 +427,7 @@ private:
     std::shared_ptr<lake::LocationProvider> _lake_location_provider;
     lake::UpdateManager* _lake_update_manager = nullptr;
     lake::ReplicationTxnManager* _lake_replication_txn_manager = nullptr;
+    std::unique_ptr<ThreadPool> _put_aggregate_metadata_thread_pool = nullptr;
 
     AgentServer* _agent_server = nullptr;
     query_cache::CacheManagerRawPtr _cache_mgr;

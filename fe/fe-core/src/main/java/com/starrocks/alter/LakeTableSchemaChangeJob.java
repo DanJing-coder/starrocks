@@ -51,18 +51,18 @@ import com.starrocks.common.Config;
 import com.starrocks.common.FeConstants;
 import com.starrocks.common.MaterializedViewExceptions;
 import com.starrocks.common.Status;
-import com.starrocks.common.io.Text;
 import com.starrocks.common.util.TimeUtils;
 import com.starrocks.common.util.concurrent.MarkedCountDownLatch;
 import com.starrocks.journal.JournalTask;
-import com.starrocks.lake.LakeTablet;
+import com.starrocks.lake.LakeTableHelper;
 import com.starrocks.lake.Utils;
 import com.starrocks.persist.EditLog;
-import com.starrocks.persist.gson.GsonUtils;
+import com.starrocks.proto.AggregatePublishVersionRequest;
 import com.starrocks.proto.TxnInfoPB;
 import com.starrocks.proto.TxnTypePB;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.server.WarehouseManager;
 import com.starrocks.sql.analyzer.AnalyzeState;
 import com.starrocks.sql.analyzer.ExpressionAnalyzer;
 import com.starrocks.sql.analyzer.Field;
@@ -93,8 +93,6 @@ import io.opentelemetry.api.trace.StatusCode;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-import java.io.DataOutput;
-import java.io.IOException;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
@@ -162,6 +160,9 @@ public class LakeTableSchemaChangeJob extends LakeTableSchemaChangeJobBase {
     private MarkedCountDownLatch<Long, Long> createReplicaLatch = null;
     private AtomicBoolean waitingCreatingReplica = new AtomicBoolean(false);
     private AtomicBoolean isCancelling = new AtomicBoolean(false);
+    private boolean isFileBundling = false;
+
+    final WarehouseManager warehouseManager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
 
     // for deserialization
     public LakeTableSchemaChangeJob() {
@@ -245,9 +246,14 @@ public class LakeTableSchemaChangeJob extends LakeTableSchemaChangeJobBase {
             // If upgraded from an old version and do schema change,
             // the schema saved in indexSchemaMap is the schema in the old version, whose uniqueId is -1,
             // so here we initialize column uniqueId here.
-            restoreColumnUniqueIdIfNeed(indexSchemaMap.get(shadowIdxId));
+            List<Column> columns = indexSchemaMap.get(shadowIdxId);
+            boolean restored = LakeTableHelper.restoreColumnUniqueId(columns);
+            if (restored) {
+                LOG.info("Columns of index {} in table {} has reset all unique ids, column size: {}", shadowIdxId,
+                        tableName, columns.size());
+            }
 
-            table.setIndexMeta(shadowIdxId, indexIdToName.get(shadowIdxId), indexSchemaMap.get(shadowIdxId), 0, 0,
+            table.setIndexMeta(shadowIdxId, indexIdToName.get(shadowIdxId), columns, 0, 0,
                     indexShortKeyMap.get(shadowIdxId), TStorageType.COLUMN,
                     table.getKeysTypeByIndexId(indexIdMap.get(shadowIdxId)), null, sortKeyColumnIndexes,
                     sortKeyColumnUniqueIds);
@@ -357,7 +363,10 @@ public class LakeTableSchemaChangeJob extends LakeTableSchemaChangeJobBase {
             OlapTable table = getTableOrThrow(db, tableId);
             Preconditions.checkState(table.getState() == OlapTable.OlapTableState.SCHEMA_CHANGE);
 
-            enableTabletCreationOptimization |= table.enablePartitionAggregation();
+            // disable tablet creation optimaization to avoid overwriting files with the same name.
+            if (table.isFileBundling()) {
+                enableTabletCreationOptimization = false;
+            }
             if (enableTabletCreationOptimization) {
                 numTablets = physicalPartitionIndexMap.size();
             } else {
@@ -368,6 +377,7 @@ public class LakeTableSchemaChangeJob extends LakeTableSchemaChangeJobBase {
             createReplicaLatch = countDownLatch;
             long baseIndexId = table.getBaseIndexId();
             long gtid = getNextGtid();
+            final WarehouseManager warehouseManager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
             for (long physicalPartitionId : physicalPartitionIndexMap.rowKeySet()) {
                 PhysicalPartition physicalPartition = table.getPhysicalPartition(physicalPartitionId);
                 Preconditions.checkState(physicalPartition != null);
@@ -401,8 +411,8 @@ public class LakeTableSchemaChangeJob extends LakeTableSchemaChangeJobBase {
                     boolean createSchemaFile = true;
                     for (Tablet shadowTablet : shadowIdx.getTablets()) {
                         long shadowTabletId = shadowTablet.getId();
-                        ComputeNode computeNode = GlobalStateMgr.getCurrentState().getWarehouseMgr()
-                                .getComputeNodeAssignedToTablet(warehouseId, (LakeTablet) shadowTablet);
+                        ComputeNode computeNode = warehouseManager.getComputeNodeAssignedToTablet(computeResource,
+                                shadowTabletId);
                         if (computeNode == null) {
                             //todo: fix the error message.
                             throw new AlterCancelException("No alive backend");
@@ -429,6 +439,7 @@ public class LakeTableSchemaChangeJob extends LakeTableSchemaChangeJobBase {
                                 .setTabletSchema(tabletSchema)
                                 .setEnableTabletCreationOptimization(enableTabletCreationOptimization)
                                 .setGtid(gtid)
+                                .setCompactionStrategy(table.getCompactionStrategy())
                                 .build();
                         // For each partition, the schema file is created only when the first Tablet is created
                         createSchemaFile = false;
@@ -634,8 +645,8 @@ public class LakeTableSchemaChangeJob extends LakeTableSchemaChangeJobBase {
                     }
 
                     for (Tablet shadowTablet : shadowIdx.getTablets()) {
-                        ComputeNode computeNode = GlobalStateMgr.getCurrentState().getWarehouseMgr()
-                                .getComputeNodeAssignedToTablet(warehouseId, (LakeTablet) shadowTablet);
+                        ComputeNode computeNode = warehouseManager.getComputeNodeAssignedToTablet(computeResource,
+                                shadowTablet.getId());
                         if (computeNode == null) {
                             throw new AlterCancelException("No alive backend");
                         }
@@ -767,6 +778,7 @@ public class LakeTableSchemaChangeJob extends LakeTableSchemaChangeJobBase {
     boolean readyToPublishVersion() throws AlterCancelException {
         try (ReadLockedDatabase db = getReadLockedDatabase(dbId)) {
             OlapTable table = getTableOrThrow(db, tableId);
+            isFileBundling = table.isFileBundling();
             for (long partitionId : physicalPartitionIndexMap.rowKeySet()) {
                 PhysicalPartition partition = table.getPhysicalPartition(partitionId);
                 Preconditions.checkState(partition != null, partitionId);
@@ -790,11 +802,52 @@ public class LakeTableSchemaChangeJob extends LakeTableSchemaChangeJobBase {
             txnInfo.txnType = TxnTypePB.TXN_NORMAL;
             txnInfo.commitTime = finishedTimeMs / 1000;
             txnInfo.gtid = watershedGtid;
+
+            // txnId is -1 means that BE do nothing, just upgrade the tablet_meta version
+            TxnInfoPB originTxnInfo = new TxnInfoPB();
+            originTxnInfo.txnId = -1L;
+            originTxnInfo.combinedTxnLog = false;
+            originTxnInfo.commitTime = finishedTimeMs / 1000;
+            originTxnInfo.txnType = TxnTypePB.TXN_EMPTY;
+            originTxnInfo.gtid = watershedGtid;
+
             for (long partitionId : physicalPartitionIndexMap.rowKeySet()) {
+                AggregatePublishVersionRequest request = new AggregatePublishVersionRequest();
                 long commitVersion = commitVersionMap.get(partitionId);
                 Map<Long, MaterializedIndex> shadowIndexMap = physicalPartitionIndexMap.row(partitionId);
                 for (MaterializedIndex shadowIndex : shadowIndexMap.values()) {
-                    Utils.publishVersion(shadowIndex.getTablets(), txnInfo, 1, commitVersion, warehouseId);
+                    if (!isFileBundling) {
+                        Utils.publishVersion(shadowIndex.getTablets(), txnInfo, 1, commitVersion, computeResource,
+                                isFileBundling);
+                    } else {
+                        Utils.createSubRequestForAggregatePublish(shadowIndex.getTablets(),
+                                Lists.newArrayList(txnInfo), 1, commitVersion, null, computeResource, request);
+                    }
+                }
+
+                // For indexes whose schema have not changed, we still need to upgrade the version
+                List<MaterializedIndex> originMaterializedIndex;
+                List<Tablet> allOtherPartitionTablets = new ArrayList<>();
+                try (ReadLockedDatabase db = getReadLockedDatabase(dbId)) {
+                    OlapTable table = getTableOrThrow(db, tableId);
+                    PhysicalPartition partition = table.getPhysicalPartition(partitionId);
+                    originMaterializedIndex = partition.getMaterializedIndices(MaterializedIndex.IndexExtState.VISIBLE);
+                }
+
+                for (MaterializedIndex index : originMaterializedIndex) {
+                    allOtherPartitionTablets.addAll(index.getTablets());
+                }
+
+                if (!isFileBundling) {
+                    Utils.publishVersion(allOtherPartitionTablets, originTxnInfo, commitVersion - 1, commitVersion, 
+                            computeResource, isFileBundling);
+                } else {
+                    Utils.createSubRequestForAggregatePublish(allOtherPartitionTablets, Lists.newArrayList(originTxnInfo),
+                            commitVersion - 1, commitVersion, null, computeResource, request);
+                }
+
+                if (isFileBundling) {
+                    Utils.sendAggregatePublishVersionRequest(request, 1, computeResource, null, null);
                 }
             }
             return true;
@@ -935,7 +988,7 @@ public class LakeTableSchemaChangeJob extends LakeTableSchemaChangeJobBase {
             assert shadowIndexId != null;
             assert shadowIndex != null;
             TStorageMedium medium = table.getPartitionInfo().getDataProperty(physicalPartition.getParentId()).getStorageMedium();
-            TabletMeta shadowTabletMeta = new TabletMeta(dbId, tableId, partitionId, shadowIndexId, 0, medium, true);
+            TabletMeta shadowTabletMeta = new TabletMeta(dbId, tableId, partitionId, shadowIndexId, medium, true);
             for (Tablet shadowTablet : shadowIndex.getTablets()) {
                 invertedIndex.addTablet(shadowTablet.getId(), shadowTabletMeta);
             }
@@ -1011,7 +1064,7 @@ public class LakeTableSchemaChangeJob extends LakeTableSchemaChangeJobBase {
 
                 // Add Tablet to TabletInvertedIndex.
                 TabletMeta shadowTabletMeta =
-                        new TabletMeta(dbId, tableId, partition.getId(), shadowIdxId, 0, medium, true);
+                        new TabletMeta(dbId, tableId, partition.getId(), shadowIdxId, medium, true);
                 for (Tablet tablet : shadowIdx.getTablets()) {
                     invertedIndex.addTablet(tablet.getId(), shadowTabletMeta);
                 }
@@ -1159,9 +1212,6 @@ public class LakeTableSchemaChangeJob extends LakeTableSchemaChangeJobBase {
         }
     }
 
-    @Override
-    public void write(DataOutput out) throws IOException {
-        String json = GsonUtils.GSON.toJson(this, AlterJobV2.class);
-        Text.writeString(out, json);
-    }
+
+
 }

@@ -36,6 +36,7 @@ namespace cpp starrocks
 namespace java com.starrocks.thrift
 
 include "Exprs.thrift"
+include "Partitions.thrift"
 include "Types.thrift"
 
 enum TRuntimeFilterBuildJoinMode {
@@ -50,7 +51,8 @@ enum TRuntimeFilterBuildJoinMode {
 
 enum TRuntimeFilterBuildType {
   JOIN_FILTER,
-  TOPN_FILTER
+  TOPN_FILTER,
+  AGG_FILTER,
 }
 
 struct TRuntimeFilterDestination {
@@ -92,6 +94,7 @@ struct TRuntimeFilterLayout {
   7: optional list<i32> bucketseq_to_instance;
   8: optional list<i32> bucketseq_to_driverseq;
   9: optional list<i32> bucketseq_to_partition;
+  10: optional list<Partitions.TBucketProperty> bucket_properties;
 }
 
 struct TRuntimeFilterDescription {

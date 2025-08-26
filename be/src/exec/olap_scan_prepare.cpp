@@ -369,7 +369,7 @@ Status ChunkPredicateBuilder<E, Type>::_build_bitset_in_predicates(PredicateComp
         if (slot_desc == nullptr) {
             continue;
         }
-        if (desc->is_topn_filter()) {
+        if (desc->is_stream_build_filter()) {
             continue;
         }
 
@@ -772,7 +772,7 @@ Status ChunkPredicateBuilder<E, Type>::normalize_join_runtime_filter(const SlotD
         if (!desc->is_probe_slot_ref(&slot_id) || slot_id != slot.id()) continue;
 
         // runtime filter existed and does not have null.
-        if (rf == nullptr) {
+        if (rf == nullptr || rf->get_in_filter() != nullptr) {
             rt_ranger_params.add_unarrived_rf(desc, &slot, _opts.driver_sequence);
             continue;
         }
@@ -1028,6 +1028,18 @@ Status ChunkPredicateBuilder<E, Type>::build_olap_filters() {
                     filters.emplace_back(std::move(not_null_filter));
                 }
             }
+            const bool full_range = std::visit([](auto&& range) { return range.is_full_value_range(); }, iter.second);
+            if (full_range) {
+                if constexpr (Negative) {
+                    return Status::EndOfFile("EOF, Filter by always false condition");
+                } else {
+                    auto not_null_filter = std::visit(
+                            [&](auto&& range) { return range.template to_olap_not_null_filter<ConditionType>(); },
+                            iter.second);
+                    filters.clear();
+                    filters.emplace_back(std::move(not_null_filter));
+                }
+            }
 
             for (auto& filter : filters) {
                 result_filters.emplace_back(std::move(filter));
@@ -1101,8 +1113,8 @@ Status ChunkPredicateBuilder<E, Type>::_get_column_predicates(PredicateParser* p
                                                               ColumnPredicatePtrs& col_preds_owner) {
     auto process_filter_conditions = [&]<typename ConditionType>(const std::vector<ConditionType>& filters) {
         for (const auto& filter : filters) {
-            std::unique_ptr<ColumnPredicate> p(parser->parse_thrift_cond(filter));
-            RETURN_IF(!p, Status::RuntimeError("invalid filter"));
+            ASSIGN_OR_RETURN(auto raw_p, parser->parse_thrift_cond(filter));
+            std::unique_ptr<ColumnPredicate> p(raw_p);
             p->set_index_filter_only(filter.is_index_filter_only);
             col_preds_owner.emplace_back(std::move(p));
         }
@@ -1115,8 +1127,8 @@ Status ChunkPredicateBuilder<E, Type>::_get_column_predicates(PredicateParser* p
     }
 
     for (auto& f : is_null_vector) {
-        std::unique_ptr<ColumnPredicate> p(parser->parse_thrift_cond(f));
-        RETURN_IF(!p, Status::RuntimeError("invalid filter"));
+        ASSIGN_OR_RETURN(auto raw_p, parser->parse_thrift_cond(f));
+        std::unique_ptr<ColumnPredicate> p(raw_p);
         col_preds_owner.emplace_back(std::move(p));
     }
 
@@ -1151,7 +1163,7 @@ Status ChunkPredicateBuilder<E, Type>::_get_column_predicates(PredicateParser* p
             if (slot_desc == nullptr) {
                 continue;
             }
-            if (desc->is_topn_filter()) {
+            if (desc->is_stream_build_filter()) {
                 continue;
             }
 
@@ -1214,6 +1226,11 @@ Status ChunkPredicateBuilder<E, Type>::build_column_expr_predicates() {
         const SlotDescriptor* slot_desc = slots[index];
         LogicalType ltype = slot_desc->type().type;
         if (!support_column_expr_predicate(ltype)) {
+            continue;
+        }
+
+        // string column may use local dict optimiztion, throw exception will take unexcept result
+        if (is_string_type(ltype) && _opts.runtime_state->query_options().allow_throw_exception) {
             continue;
         }
 
@@ -1352,7 +1369,7 @@ StatusOr<RuntimeFilterPredicates> ScanConjunctsManager::get_runtime_filter_predi
         if (slot_desc == nullptr) {
             continue;
         }
-        if (desc->is_topn_filter()) {
+        if (desc->is_stream_build_filter()) {
             continue;
         }
         // If the runtime filter's partition-by-exprs's size is greater than 1, skip to push it down to storage engine.

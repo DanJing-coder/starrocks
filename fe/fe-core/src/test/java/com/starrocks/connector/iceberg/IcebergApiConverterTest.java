@@ -19,6 +19,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
 import com.starrocks.analysis.Expr;
+import com.starrocks.analysis.OrderByElement;
 import com.starrocks.catalog.ArrayType;
 import com.starrocks.catalog.Column;
 import com.starrocks.catalog.MapType;
@@ -35,10 +36,13 @@ import org.apache.iceberg.DataFiles;
 import org.apache.iceberg.FileFormat;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
+import org.apache.iceberg.SortField;
+import org.apache.iceberg.SortOrder;
 import org.apache.iceberg.catalog.Namespace;
 import org.apache.iceberg.types.Types;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -52,9 +56,9 @@ import static org.apache.iceberg.TableProperties.AVRO_COMPRESSION;
 import static org.apache.iceberg.TableProperties.DEFAULT_FILE_FORMAT;
 import static org.apache.iceberg.TableProperties.ORC_COMPRESSION;
 import static org.apache.iceberg.TableProperties.PARQUET_COMPRESSION;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertThrows;
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class IcebergApiConverterTest {
 
@@ -62,19 +66,21 @@ public class IcebergApiConverterTest {
     public void testGetHdfsFileFormat() {
         RemoteFileInputFormat fileFormat = IcebergApiConverter.getHdfsFileFormat(FileFormat.PARQUET);
         assertTrue(fileFormat.equals(RemoteFileInputFormat.PARQUET));
-        assertThrows("Unexpected file format: %s", StarRocksConnectorException.class, () -> {
-            IcebergApiConverter.getHdfsFileFormat(FileFormat.AVRO);
-        });
+        assertThrows(StarRocksConnectorException.class, () -> IcebergApiConverter.getHdfsFileFormat(FileFormat.AVRO),
+                "Unexpected file format: %s");
     }
 
     @Test
     public void testDecimal() {
         int precision = 9;
         int scale = 5;
-        Type decimalType = ScalarType.createUnifiedDecimalType(precision, scale);
         org.apache.iceberg.types.Type icebergType = Types.DecimalType.of(precision, scale);
         Type resType = fromIcebergType(icebergType);
-        assertEquals(resType, decimalType);
+        assertEquals(resType, ScalarType.createDecimalV3Type(PrimitiveType.DECIMAL32, 9, scale));
+        resType = fromIcebergType(Types.DecimalType.of(10, scale));
+        assertEquals(resType, ScalarType.createDecimalV3Type(PrimitiveType.DECIMAL64, 10, scale));
+        resType = fromIcebergType(Types.DecimalType.of(19, scale));
+        assertEquals(resType, ScalarType.createDecimalV3Type(PrimitiveType.DECIMAL128, 19, scale));
     }
 
     @Test
@@ -252,6 +258,19 @@ public class IcebergApiConverterTest {
     }
 
     @Test
+    public void testReverseByteBuffer() {
+        byte[] bytes = new byte[] {1, 2, 3, 4, 5};
+        ByteBuffer byteBuffer = ByteBuffer.wrap(bytes);
+        IcebergApiConverter.reverseBuffer(byteBuffer);
+        assertEquals(5, byteBuffer.remaining());
+        assertEquals(5, byteBuffer.get(0));
+        assertEquals(4, byteBuffer.get(1));
+        assertEquals(3, byteBuffer.get(2));
+        assertEquals(2, byteBuffer.get(3));
+        assertEquals(1, byteBuffer.get(4));
+    }
+
+    @Test
     public void testTime() {
         Type timeType = ScalarType.createType(PrimitiveType.TIME);
         org.apache.iceberg.types.Type icebergType = Types.TimeType.get();
@@ -358,9 +377,8 @@ public class IcebergApiConverterTest {
 
         ListPartitionDesc partDesc = new ListPartitionDesc(colNames, null);
         partDesc.setPartitionExprs(partitionExprs);
-        assertThrows("Unsupported partition transform degrees for column c1", SemanticException.class, () -> {
-            IcebergApiConverter.parsePartitionFields(schema, partDesc);
-        });
+        assertThrows(SemanticException.class, () -> IcebergApiConverter.parsePartitionFields(schema, partDesc),
+                "Unsupported partition transform degrees for column c1");
     }
 
     @Test
@@ -383,9 +401,8 @@ public class IcebergApiConverterTest {
 
         ListPartitionDesc partDesc = new ListPartitionDesc(colNames, null);
         partDesc.setPartitionExprs(partitionExprs);
-        assertThrows("Column c6 not found in schema", SemanticException.class, () -> {
-            IcebergApiConverter.parsePartitionFields(schema, partDesc);
-        });
+        assertThrows(SemanticException.class, () -> IcebergApiConverter.parsePartitionFields(schema, partDesc),
+                "Column c6 not found in schema");
     }
 
     @Test
@@ -437,9 +454,8 @@ public class IcebergApiConverterTest {
 
         ListPartitionDesc partDesc = new ListPartitionDesc(colNames, null);
         partDesc.setPartitionExprs(partitionExprs);
-        assertThrows("Unsupported partition transform hour for arguments", SemanticException.class, () -> {
-            IcebergApiConverter.parsePartitionFields(schema, partDesc);
-        });
+        assertThrows(SemanticException.class, () -> IcebergApiConverter.parsePartitionFields(schema, partDesc),
+                "Unsupported partition transform hour for arguments");
     }
 
     @Test
@@ -465,12 +481,11 @@ public class IcebergApiConverterTest {
         ListPartitionDesc partDesc = new ListPartitionDesc(colNames, null);
         partDesc.setPartitionExprs(partitionExprs);
 
-        assertThrows("Unsupported partition definition", SemanticException.class, () -> {
-            IcebergApiConverter.parsePartitionFields(schema, partDesc);
-        });
+        assertThrows(SemanticException.class, () -> IcebergApiConverter.parsePartitionFields(schema, partDesc),
+                "Unsupported partition definition");
     }
 
-    @Test 
+    @Test
     public void testIcebergColumnType() {
         org.apache.iceberg.types.Type type;
         type = IcebergApiConverter.toIcebergColumnType(ScalarType.createType(PrimitiveType.INT));
@@ -498,4 +513,27 @@ public class IcebergApiConverterTest {
         type = IcebergApiConverter.toIcebergColumnType(ScalarType.createType(PrimitiveType.VARBINARY));
         assertEquals(org.apache.iceberg.types.Type.TypeID.BINARY, type.typeId());
     }
+
+    @Test
+    public void testToIcebergSortOrder() {
+        List<Types.NestedField> fields = Lists.newArrayList();
+        fields.add(Types.NestedField.optional(1, "id", new Types.IntegerType()));
+        fields.add(Types.NestedField.optional(2, "dt", new Types.DateType()));
+        fields.add(Types.NestedField.optional(3, "data", new Types.StringType()));
+        Schema schema = new Schema(fields);
+
+        SortOrder nullSortOrder = IcebergApiConverter.toIcebergSortOrder(schema, null);
+        assertEquals(nullSortOrder, null);
+
+        List<OrderByElement> orderByElements = new ArrayList<>();
+        Expr expr1 = ColumnIdExpr.fromSql("id").getExpr();
+        orderByElements.add(new OrderByElement(expr1, true, true));
+        Expr expr2 = ColumnIdExpr.fromSql("dt").getExpr();
+        orderByElements.add(new OrderByElement(expr2, false, false));
+
+        SortOrder sortOrder = IcebergApiConverter.toIcebergSortOrder(schema, orderByElements);
+        List<SortField> sortFields = sortOrder.fields();
+        assertEquals(sortFields.size(), 2);
+    }
+
 }

@@ -43,7 +43,8 @@
 
 #include "agent/agent_common.h"
 #include "agent/agent_server.h"
-#include "cache/block_cache/block_cache.h"
+#include "cache/datacache.h"
+#include "cache/object_cache/page_cache.h"
 #include "common/configbase.h"
 #include "common/status.h"
 #include "exec/workgroup/scan_executor.h"
@@ -57,11 +58,10 @@
 #include "runtime/load_channel_mgr.h"
 #include "storage/compaction_manager.h"
 #include "storage/lake/compaction_scheduler.h"
-#include "storage/lake/load_spill_block_manager.h"
 #include "storage/lake/tablet_manager.h"
 #include "storage/lake/update_manager.h"
+#include "storage/load_spill_block_manager.h"
 #include "storage/memtable_flush_executor.h"
-#include "storage/page_cache.h"
 #include "storage/persistent_index_compaction_manager.h"
 #include "storage/persistent_index_load_executor.h"
 #include "storage/segment_flush_executor.h"
@@ -90,23 +90,32 @@ Status UpdateConfigAction::update_config(const std::string& name, const std::str
             return Status::OK();
         });
         _config_callback.emplace("storage_page_cache_limit", [&]() -> Status {
-            ASSIGN_OR_RETURN(int64_t cache_limit, CacheEnv::GetInstance()->get_storage_page_cache_limit());
-            cache_limit = CacheEnv::GetInstance()->check_storage_page_cache_limit(cache_limit);
-            StoragePageCache::instance()->set_capacity(cache_limit);
+            StoragePageCache* cache = DataCache::GetInstance()->page_cache();
+            if (cache == nullptr || !cache->is_initialized()) {
+                return Status::InternalError("Page cache is not initialized");
+            }
+
+            ASSIGN_OR_RETURN(int64_t cache_limit, DataCache::GetInstance()->get_datacache_limit());
+            cache_limit = DataCache::GetInstance()->check_datacache_limit(cache_limit);
+            cache->set_capacity(cache_limit);
             return Status::OK();
         });
         _config_callback.emplace("disable_storage_page_cache", [&]() -> Status {
+            StoragePageCache* cache = DataCache::GetInstance()->page_cache();
+            if (cache == nullptr || !cache->is_initialized()) {
+                return Status::InternalError("Page cache is not initialized");
+            }
             if (config::disable_storage_page_cache) {
-                StoragePageCache::instance()->set_capacity(0);
+                cache->set_capacity(0);
             } else {
-                ASSIGN_OR_RETURN(int64_t cache_limit, CacheEnv::GetInstance()->get_storage_page_cache_limit());
-                cache_limit = CacheEnv::GetInstance()->check_storage_page_cache_limit(cache_limit);
-                StoragePageCache::instance()->set_capacity(cache_limit);
+                ASSIGN_OR_RETURN(int64_t cache_limit, DataCache::GetInstance()->get_datacache_limit());
+                cache_limit = DataCache::GetInstance()->check_datacache_limit(cache_limit);
+                cache->set_capacity(cache_limit);
             }
             return Status::OK();
         });
         _config_callback.emplace("datacache_mem_size", [&]() -> Status {
-            LocalCache* cache = CacheEnv::GetInstance()->local_cache();
+            LocalCacheEngine* cache = DataCache::GetInstance()->local_cache();
             if (cache == nullptr || !cache->is_initialized()) {
                 return Status::InternalError("Local cache is not initialized");
             }
@@ -121,7 +130,7 @@ Status UpdateConfigAction::update_config(const std::string& name, const std::str
             return cache->update_mem_quota(mem_size, true);
         });
         _config_callback.emplace("datacache_disk_size", [&]() -> Status {
-            LocalCache* cache = CacheEnv::GetInstance()->local_cache();
+            LocalCacheEngine* cache = DataCache::GetInstance()->local_cache();
             if (cache == nullptr || !cache->is_initialized()) {
                 return Status::InternalError("Local cache is not initialized");
             }
@@ -138,6 +147,13 @@ Status UpdateConfigAction::update_config(const std::string& name, const std::str
                 space.size = disk_size;
             }
             return cache->update_disk_spaces(spaces);
+        });
+        _config_callback.emplace("datacache_inline_item_count_limit", [&]() -> Status {
+            LocalCacheEngine* cache = DataCache::GetInstance()->local_cache();
+            if (cache == nullptr || !cache->is_initialized()) {
+                return Status::InternalError("Local cache is not initialized");
+            }
+            return cache->update_inline_cache_count_limit(config::datacache_inline_item_count_limit);
         });
         _config_callback.emplace("max_compaction_concurrency", [&]() -> Status {
             if (!config::enable_event_based_compaction_framework) {
@@ -199,9 +215,17 @@ Status UpdateConfigAction::update_config(const std::string& name, const std::str
             return Status::OK();
         });
         _config_callback.emplace("transaction_publish_version_worker_count", [&]() -> Status {
-            auto thread_pool = ExecEnv::GetInstance()->agent_server()->get_thread_pool(TTaskType::PUBLISH_VERSION);
-            return thread_pool->update_max_threads(
+            Status st1 = ExecEnv::GetInstance()
+                                 ->agent_server()
+                                 ->get_thread_pool(TTaskType::PUBLISH_VERSION)
+                                 ->update_max_threads(std::max(MIN_TRANSACTION_PUBLISH_WORKER_COUNT,
+                                                               config::transaction_publish_version_worker_count));
+            Status st2 = ExecEnv::GetInstance()->put_aggregate_metadata_thread_pool()->update_max_threads(
                     std::max(MIN_TRANSACTION_PUBLISH_WORKER_COUNT, config::transaction_publish_version_worker_count));
+            if (!st1.ok() || !st2.ok()) {
+                return Status::InvalidArgument("Failed to update transaction_publish_version_worker_count.");
+            }
+            return st1;
         });
         _config_callback.emplace("transaction_publish_version_thread_pool_num_min", [&]() -> Status {
             auto thread_pool = ExecEnv::GetInstance()->agent_server()->get_thread_pool(TTaskType::PUBLISH_VERSION);

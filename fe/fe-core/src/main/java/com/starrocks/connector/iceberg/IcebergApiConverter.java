@@ -14,11 +14,13 @@
 
 package com.starrocks.connector.iceberg;
 
+import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
 import com.google.common.collect.Lists;
 import com.starrocks.analysis.Expr;
 import com.starrocks.analysis.FunctionCallExpr;
 import com.starrocks.analysis.IntLiteral;
+import com.starrocks.analysis.OrderByElement;
 import com.starrocks.analysis.SlotRef;
 import com.starrocks.catalog.ArrayType;
 import com.starrocks.catalog.Column;
@@ -31,6 +33,7 @@ import com.starrocks.catalog.StructField;
 import com.starrocks.catalog.StructType;
 import com.starrocks.catalog.Type;
 import com.starrocks.common.FeConstants;
+import com.starrocks.common.Pair;
 import com.starrocks.connector.ConnectorViewDefinition;
 import com.starrocks.connector.exception.StarRocksConnectorException;
 import com.starrocks.connector.hive.RemoteFileInputFormat;
@@ -46,11 +49,13 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.iceberg.FileFormat;
 import org.apache.iceberg.ManifestFile;
 import org.apache.iceberg.Metrics;
+import org.apache.iceberg.NullOrder;
 import org.apache.iceberg.PartitionField;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.SnapshotSummary;
+import org.apache.iceberg.SortOrder;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.catalog.Namespace;
@@ -58,6 +63,7 @@ import org.apache.iceberg.expressions.Expression;
 import org.apache.iceberg.expressions.ManifestEvaluator;
 import org.apache.iceberg.expressions.Projections;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
+import org.apache.iceberg.transforms.PartitionSpecVisitor;
 import org.apache.iceberg.types.TypeUtil;
 import org.apache.iceberg.types.Types;
 import org.apache.iceberg.view.SQLViewRepresentation;
@@ -72,6 +78,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -137,6 +144,32 @@ public class IcebergApiConverter {
         AtomicInteger nextFieldId = new AtomicInteger(1);
         icebergSchema = TypeUtil.assignFreshIds(icebergSchema, nextFieldId::getAndIncrement);
         return new Schema(icebergSchema.asStructType().fields());
+    }
+
+    public static SortOrder toIcebergSortOrder(Schema schema, List<OrderByElement> orderByElements) {
+        if (orderByElements == null) {
+            return null;
+        }
+
+        SortOrder.Builder builder = SortOrder.builderFor(schema);
+        for (OrderByElement orderByElement : orderByElements) {
+            String columnName = orderByElement.castAsSlotRef();
+            Preconditions.checkNotNull(columnName);
+            NullOrder nullOrder = orderByElement.getNullsFirstParam() ? NullOrder.NULLS_FIRST : NullOrder.NULLS_LAST;
+            if (orderByElement.getIsAsc()) {
+                builder.asc(columnName, nullOrder);
+            } else {
+                builder.desc(columnName, nullOrder);
+            }
+        }
+
+        SortOrder sortOrder = null;
+        try {
+            sortOrder = builder.build();
+        } catch (Exception e) {
+            throw new StarRocksConnectorException("Fail to build Iceberg sortOrder, msg: %s", e.getMessage());
+        }
+        return sortOrder;
     }
 
     // TODO(stephen): support iceberg transform partition like `partition by day(dt)`
@@ -329,7 +362,24 @@ public class IcebergApiConverter {
         return tIcebergSchemaField;
     }
 
-    public static Metrics buildDataFileMetrics(TIcebergDataFile dataFile) {
+    public static void reverseBuffer(ByteBuffer buf) {
+        if (buf == null || buf.remaining() <= 1) {
+            return; // nothing to reverse
+        }
+        int lo = buf.position();
+        int hi = buf.limit() - 1;
+
+        while (lo < hi) {
+            byte bLo = buf.get(lo);
+            byte bHi = buf.get(hi);
+            buf.put(lo, bHi);
+            buf.put(hi, bLo);
+            lo++;
+            hi--;
+        }
+    }
+
+    public static Metrics buildDataFileMetrics(TIcebergDataFile dataFile, org.apache.iceberg.Table nativeTable) {
         Map<Integer, Long> columnSizes = new HashMap<>();
         Map<Integer, Long> valueCounts = new HashMap<>();
         Map<Integer, Long> nullValueCounts = new HashMap<>();
@@ -351,6 +401,14 @@ public class IcebergApiConverter {
             }
             if (stats.isSetUpper_bounds()) {
                 upperBounds = stats.upper_bounds;
+            }
+        }
+
+        for (Types.NestedField field : nativeTable.schema().columns()) {
+            if (field.type() instanceof Types.DecimalType || field.type() == Types.UUIDType.get()) {
+                //change to BigEndian
+                reverseBuffer(lowerBounds.get(field.fieldId()));
+                reverseBuffer(upperBounds.get(field.fieldId()));
             }
         }
 
@@ -436,15 +494,73 @@ public class IcebergApiConverter {
         return view;
     }
 
-    public static List<String> toPartitionFields(PartitionSpec spec) {
+    public static List<String> toPartitionFields(PartitionSpec spec, Boolean withTransfomPrefix) {
         return spec.fields().stream()
-                .map(field -> toPartitionField(spec, field))
+                .map(field -> toPartitionField(spec, field, withTransfomPrefix))
                 .collect(toImmutableList());
     }
 
-    private static String toPartitionField(PartitionSpec spec, PartitionField field) {
+    public static List<Pair<Integer, Integer>> getBucketSourceIdWithBucketNum(PartitionSpec spec) {
+        return PartitionSpecVisitor.visit(spec, new BucketPartitionSpecVisitor()).stream()
+                .filter(Objects::nonNull)
+                .collect(Collectors.toList());
+    }
+
+    private static class BucketPartitionSpecVisitor
+            implements PartitionSpecVisitor<Pair<Integer, Integer>> {
+        @Override
+        public Pair<Integer, Integer> identity(int fieldId, String sourceName, int sourceId) {
+            return null;
+        }
+
+        @Override
+        public Pair<Integer, Integer> bucket(
+                int fieldId, String sourceName, int sourceId, int numBuckets) {
+            return new Pair<>(sourceId, numBuckets);
+        }
+
+        @Override
+        public Pair<Integer, Integer> truncate(
+                int fieldId, String sourceName, int sourceId, int width) {
+            return null;
+        }
+
+        @Override
+        public Pair<Integer, Integer> year(int fieldId, String sourceName, int sourceId) {
+            return null;
+        }
+
+        @Override
+        public Pair<Integer, Integer> month(int fieldId, String sourceName, int sourceId) {
+            return null;
+        }
+
+        @Override
+        public Pair<Integer, Integer> day(int fieldId, String sourceName, int sourceId) {
+            return null;
+        }
+
+        @Override
+        public Pair<Integer, Integer> hour(int fieldId, String sourceName, int sourceId) {
+            return null;
+        }
+
+        @Override
+        public Pair<Integer, Integer> alwaysNull(int fieldId, String sourceName, int sourceId) {
+            return null;
+        }
+
+        @Override
+        public Pair<Integer, Integer> unknown(
+                int fieldId, String sourceName, int sourceId, String transform) {
+            return null;
+        }
+    }
+
+    public static String toPartitionField(PartitionSpec spec, PartitionField field, Boolean withTransfomPrefix) {
         String name = spec.schema().findColumnName(field.sourceId());
         String transform = field.transform().toString();
+        String prefix = withTransfomPrefix ? FeConstants.ICEBERG_TRANSFORM_EXPRESSION_PREFIX : "";
 
         switch (transform) {
             case "identity":
@@ -454,17 +570,17 @@ public class IcebergApiConverter {
             case "day":
             case "hour":
             case "void":
-                return format("%s(%s)", transform, name);
+                return prefix + format("%s(%s)", transform, name);
         }
 
         Matcher matcher = ICEBERG_BUCKET_PATTERN.matcher(transform);
         if (matcher.matches()) {
-            return format("bucket(%s, %s)", name, matcher.group(1));
+            return prefix + format("bucket(%s, %s)", name, matcher.group(1));
         }
 
         matcher = ICEBERG_TRUNCATE_PATTERN.matcher(transform);
         if (matcher.matches()) {
-            return format("truncate(%s, %s)", name, matcher.group(1));
+            return prefix + format("truncate(%s, %s)", name, matcher.group(1));
         }
 
         throw new StarRocksConnectorException("Unsupported partition transform: " + field);

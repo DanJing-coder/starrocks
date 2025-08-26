@@ -26,6 +26,7 @@ import com.starrocks.system.ComputeNode;
 import com.starrocks.thrift.TStatus;
 import com.starrocks.thrift.TStatusCode;
 import com.starrocks.thrift.TUniqueId;
+import com.starrocks.warehouse.cngroup.ComputeResource;
 import org.apache.arrow.util.VisibleForTesting;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -34,7 +35,6 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
-import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicLong;
@@ -59,6 +59,7 @@ public class MergeCommitJob implements MergeCommitTaskCallback {
     private final int batchWriteParallel;
     private final boolean asyncMode;
     private final StreamLoadKvParams loadParameters;
+    private final ComputeResource computeResource;
 
     /**
      * The assigner for coordinator backends.
@@ -116,6 +117,7 @@ public class MergeCommitJob implements MergeCommitTaskCallback {
         this.mergeCommitTasks = new ConcurrentHashMap<>();
         this.lock = new ReentrantReadWriteLock();
         this.lastLoadCreateTimeMs = new AtomicLong(System.currentTimeMillis());
+        this.computeResource = streamLoadInfo.getComputeResource();
     }
 
     public long getId() {
@@ -136,6 +138,10 @@ public class MergeCommitJob implements MergeCommitTaskCallback {
 
     public int numRunningLoads() {
         return mergeCommitTasks.size();
+    }
+
+    public ComputeResource getComputeResource() {
+        return computeResource;
     }
 
     /**
@@ -221,8 +227,8 @@ public class MergeCommitJob implements MergeCommitTaskCallback {
                 backendIds.add(backendId);
             }
 
-            String label = LABEL_PREFIX + DebugUtil.printId(UUIDUtil.toTUniqueId(UUID.randomUUID()));
-            TUniqueId loadId = UUIDUtil.toTUniqueId(UUID.randomUUID());
+            TUniqueId loadId = UUIDUtil.genTUniqueId();
+            String label = LABEL_PREFIX + DebugUtil.printId(loadId);
             MergeCommitTask mergeCommitTask = new MergeCommitTask(
                     tableId, label, loadId, streamLoadInfo, batchWriteIntervalMs, loadParameters,
                     backendIds, queryCoordinatorFactory, this);

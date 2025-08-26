@@ -14,7 +14,6 @@
 
 package com.starrocks.sql.spm;
 
-import com.starrocks.analysis.HintNode;
 import com.starrocks.analysis.SetVarHint;
 import com.starrocks.analysis.StringLiteral;
 import com.starrocks.common.DdlException;
@@ -23,6 +22,7 @@ import com.starrocks.qe.SessionVariable;
 import com.starrocks.sql.analyzer.Analyzer;
 import com.starrocks.sql.analyzer.PlannerMetaLocker;
 import com.starrocks.sql.analyzer.SemanticException;
+import com.starrocks.sql.ast.HintNode;
 import com.starrocks.sql.ast.QueryRelation;
 import com.starrocks.sql.ast.QueryStatement;
 import com.starrocks.sql.ast.SystemVariable;
@@ -74,11 +74,11 @@ public class SPMPlanBuilder {
         this.planHints = stmt.getAllQueryScopeHints();
     }
 
-    public SPMPlanBuilder(ConnectContext session, QueryStatement planStmt) {
+    public SPMPlanBuilder(ConnectContext session, QueryStatement stmt) {
         this.session = session;
-        this.planHints = planStmt.getAllQueryScopeHints();
-        this.planStmt = planStmt.getQueryRelation();
         this.bindStmt = null;
+        this.planStmt = stmt.getQueryRelation();
+        this.planHints = stmt.getAllQueryScopeHints();
     }
 
     public BaselinePlan execute() {
@@ -111,6 +111,7 @@ public class SPMPlanBuilder {
                 }
             }
             session.setSessionVariable(cloneVariable);
+            session.getSessionVariable().setEnableRewriteSimpleAggToMetaScan(false);
         }
 
         try {

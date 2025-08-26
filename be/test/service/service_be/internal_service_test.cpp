@@ -20,6 +20,7 @@
 #include <memory>
 
 #include "cache/block_cache/test_cache_utils.h"
+#include "cache/datacache.h"
 #include "common/utils.h"
 #include "exec/tablet_sink_index_channel.h"
 #include "runtime/exec_env.h"
@@ -192,7 +193,7 @@ TEST_F(InternalServiceTest, test_fetch_datacache_via_brpc) {
         Status st = cache->write(cache_key, 0, cache_size, value.c_str());
         ASSERT_TRUE(st.ok());
 
-        CacheEnv* cache_env = CacheEnv::GetInstance();
+        DataCache* cache_env = DataCache::GetInstance();
         cache_env->_local_cache = cache->local_cache();
         cache_env->_block_cache = cache;
     }
@@ -216,6 +217,22 @@ TEST_F(InternalServiceTest, test_fetch_datacache_via_brpc) {
         std::string target_value(1024, 'a');
         ASSERT_EQ(buffer.const_raw_buf().to_string(), target_value);
     }
+}
+
+TEST_F(InternalServiceTest, test_get_load_replica_status) {
+    BackendInternalServiceImpl<PInternalService> service(ExecEnv::GetInstance());
+    PLoadReplicaStatusRequest request;
+    request.mutable_load_id()->set_hi(0);
+    request.mutable_load_id()->set_lo(0);
+    request.set_txn_id(1);
+    request.set_sink_id(1);
+    request.set_node_id(1);
+    request.add_tablet_ids(1);
+    PLoadReplicaStatusResult response;
+    brpc::Controller cntl;
+    MockClosure closure;
+    service.get_load_replica_status(&cntl, &request, &response, &closure);
+    ASSERT_EQ(1, response.replica_statuses_size());
 }
 
 } // namespace starrocks

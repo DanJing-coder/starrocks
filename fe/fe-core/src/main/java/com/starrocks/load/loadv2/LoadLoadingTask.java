@@ -50,9 +50,9 @@ import com.starrocks.common.util.RuntimeProfile;
 import com.starrocks.common.util.TimeUtils;
 import com.starrocks.load.BrokerFileGroup;
 import com.starrocks.load.FailMsg;
+import com.starrocks.persist.OriginStatementInfo;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.DefaultCoordinator;
-import com.starrocks.qe.OriginStatement;
 import com.starrocks.qe.QeProcessorImpl;
 import com.starrocks.qe.SessionVariable;
 import com.starrocks.qe.scheduler.Coordinator;
@@ -67,6 +67,7 @@ import com.starrocks.thrift.TPartialUpdateMode;
 import com.starrocks.thrift.TUniqueId;
 import com.starrocks.transaction.TabletCommitInfo;
 import com.starrocks.transaction.TabletFailInfo;
+import com.starrocks.warehouse.cngroup.ComputeResource;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -102,13 +103,13 @@ public class LoadLoadingTask extends LoadTask {
     private final ConnectContext context;
 
     private LoadPlanner loadPlanner;
-    private final OriginStatement originStmt;
+    private final OriginStatementInfo originStmt;
     private final LoadStmt loadStmt;
     private final List<List<TBrokerFileStatus>> fileStatusList;
     private final int fileNum;
 
     private final LoadJob.JSONOptions jsonOptions;
-    private long warehouseId;
+    private ComputeResource computeResource;
 
     private LoadLoadingTask(Builder builder) {
         super(builder.callback, TaskType.LOADING, builder.priority);
@@ -136,7 +137,7 @@ public class LoadLoadingTask extends LoadTask {
         this.fileStatusList = builder.fileStatusList;
         this.fileNum = builder.fileNum;
         this.jsonOptions = builder.jsonOptions;
-        this.warehouseId = builder.warehouseId;
+        this.computeResource = builder.computeResource;
     }
 
     public void prepare() throws StarRocksException {
@@ -146,7 +147,7 @@ public class LoadLoadingTask extends LoadTask {
         loadPlanner.setPartialUpdateMode(partialUpdateMode);
         loadPlanner.setMergeConditionStr(mergeConditionStr);
         loadPlanner.setJsonOptions(jsonOptions);
-        loadPlanner.setWarehouseId(warehouseId);
+        loadPlanner.setComputeResource(computeResource);
         loadPlanner.plan();
     }
 
@@ -202,6 +203,8 @@ public class LoadLoadingTask extends LoadTask {
         summaryProfile.addInfoString("Timeout", DebugUtil.getPrettyStringMs(timeoutS * 1000));
         summaryProfile.addInfoString("Strict Mode", String.valueOf(strictMode));
         summaryProfile.addInfoString("Partial Update", String.valueOf(partialUpdate));
+        summaryProfile.addInfoString(ProfileManager.WAREHOUSE_CNGROUP,
+                GlobalStateMgr.getCurrentState().getWarehouseMgr().getWarehouseComputeResourceName(computeResource));
 
         SessionVariable variables = context.getSessionVariable();
         if (variables != null) {
@@ -294,6 +297,8 @@ public class LoadLoadingTask extends LoadTask {
                         curCoordinator.getRejectedRecordPaths(),
                         System.currentTimeMillis() - writeBeginTime);
             } else {
+                attachment = new BrokerLoadingTaskAttachment(signature,
+                        TabletFailInfo.fromThrift(curCoordinator.getFailInfos()));
                 throw new LoadException(status.getErrorMsg());
             }
         } else {
@@ -336,13 +341,13 @@ public class LoadLoadingTask extends LoadTask {
         private String mergeConditionStr;
         private TPartialUpdateMode partialUpdateMode;
         private ConnectContext context;
-        private OriginStatement originStmt;
+        private OriginStatementInfo originStmt;
         private LoadStmt loadStmt;
         private List<List<TBrokerFileStatus>> fileStatusList;
         private int fileNum = 0;
         private LoadTaskCallback callback;
         private int priority;
-        private long warehouseId;
+        private ComputeResource computeResource;
 
         private LoadJob.JSONOptions jsonOptions = new LoadJob.JSONOptions();
 
@@ -446,7 +451,7 @@ public class LoadLoadingTask extends LoadTask {
             return this;
         }
 
-        public Builder setOriginStmt(OriginStatement originStmt) {
+        public Builder setOriginStmt(OriginStatementInfo originStmt) {
             this.originStmt = originStmt;
             return this;
         }
@@ -471,8 +476,8 @@ public class LoadLoadingTask extends LoadTask {
             return this;
         }
 
-        public Builder setWarehouseId(long warehouseId) {
-            this.warehouseId = warehouseId;
+        public Builder setComputeResource(ComputeResource computeResource) {
+            this.computeResource = computeResource;
             return this;
         }
 

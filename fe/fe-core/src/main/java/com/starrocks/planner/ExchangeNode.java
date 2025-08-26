@@ -36,14 +36,11 @@ package com.starrocks.planner;
 
 import com.google.common.base.MoreObjects;
 import com.google.common.base.MoreObjects.ToStringHelper;
-import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
-import com.starrocks.analysis.Analyzer;
 import com.starrocks.analysis.Expr;
 import com.starrocks.analysis.SlotRef;
 import com.starrocks.analysis.SortInfo;
 import com.starrocks.analysis.TupleId;
-import com.starrocks.common.StarRocksException;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.SessionVariable;
 import com.starrocks.sql.optimizer.base.DistributionSpec;
@@ -164,16 +161,18 @@ public class ExchangeNode extends PlanNode {
     }
 
     @Override
+    public final void setLimit(long limit) {
+        if (limit != -1) {
+            super.setLimit(limit);
+            cardinality = Math.min(limit, cardinality);
+        }
+    }
+
+    @Override
     public final void computeTupleIds() {
         clearTupleIds();
         tupleIds.addAll(getChild(0).getTupleIds());
         nullableTupleIds.addAll(getChild(0).getNullableTupleIds());
-    }
-
-    @Override
-    public void init(Analyzer analyzer) throws StarRocksException {
-        super.init(analyzer);
-        Preconditions.checkState(conjuncts.isEmpty());
     }
 
     /**

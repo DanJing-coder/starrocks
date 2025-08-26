@@ -22,6 +22,7 @@
 
 #include "column/column.h"
 #include "exec/pipeline/runtime_filter_types.h"
+#include "exprs/agg_in_runtime_filter.h"
 #include "exprs/dictmapping_expr.h"
 #include "exprs/in_const_predicate.hpp"
 #include "exprs/literal.h"
@@ -80,6 +81,16 @@ RuntimeFilter* RuntimeFilterHelper::create_runtime_bloom_filter(ObjectPool* pool
     return create_runtime_filter_helper<ComposedRuntimeBloomFilter>(pool, type, join_mode);
 }
 
+RuntimeFilter* RuntimeFilterHelper::create_agg_runtime_in_filter(ObjectPool* pool, LogicalType type, int8_t join_mode) {
+    return scalar_type_dispatch(type, [pool]<LogicalType ltype>() -> RuntimeFilter* {
+        auto rf = new InRuntimeFilter<ltype>();
+        if (pool != nullptr) {
+            return pool->add(rf);
+        }
+        return rf;
+    });
+}
+
 RuntimeFilter* RuntimeFilterHelper::create_runtime_bitset_filter(ObjectPool* pool, LogicalType type, int8_t join_mode) {
     RuntimeFilter* filter =
             type_dispatch_bitset_filter(type, static_cast<RuntimeFilter*>(nullptr), [&]<LogicalType LT>() {
@@ -95,8 +106,8 @@ RuntimeFilter* RuntimeFilterHelper::create_runtime_bitset_filter(ObjectPool* poo
     }
 }
 
-RuntimeFilter* RuntimeFilterHelper::create_join_runtime_filter(ObjectPool* pool, RuntimeFilterSerializeType rf_type,
-                                                               LogicalType ltype, int8_t join_mode) {
+RuntimeFilter* RuntimeFilterHelper::create_runtime_filter(ObjectPool* pool, RuntimeFilterSerializeType rf_type,
+                                                          LogicalType ltype, int8_t join_mode) {
     switch (rf_type) {
     case RuntimeFilterSerializeType::EMPTY_FILTER:
         return create_runtime_empty_filter(pool, ltype, join_mode);
@@ -104,6 +115,8 @@ RuntimeFilter* RuntimeFilterHelper::create_join_runtime_filter(ObjectPool* pool,
         return create_runtime_bloom_filter(pool, ltype, join_mode);
     case RuntimeFilterSerializeType::BITSET_FILTER:
         return create_runtime_bitset_filter(pool, ltype, join_mode);
+    case RuntimeFilterSerializeType::IN_FILTER:
+        return create_agg_runtime_in_filter(pool, ltype, join_mode);
     case RuntimeFilterSerializeType::NONE:
     default:
         return nullptr;
@@ -275,7 +288,7 @@ int RuntimeFilterHelper::deserialize_runtime_filter(ObjectPool* pool, RuntimeFil
         memcpy(&rf_type, data + offset, sizeof(rf_type));
         offset += sizeof(rf_type);
     }
-    if (rf_type > RuntimeFilterSerializeType::BITSET_FILTER) {
+    if (rf_type > RuntimeFilterSerializeType::UNKNOWN_FILTER) {
         LOG(WARNING) << "unrecognized runtime filter type:" << static_cast<int>(rf_type);
         return 0;
     }
@@ -286,7 +299,7 @@ int RuntimeFilterHelper::deserialize_runtime_filter(ObjectPool* pool, RuntimeFil
     LogicalType ltype = thrift_to_type(tltype);
 
     // 4. deserialize the specific rf.
-    RuntimeFilter* filter = create_join_runtime_filter(pool, rf_type, ltype, TJoinDistributionMode::NONE);
+    RuntimeFilter* filter = create_runtime_filter(pool, rf_type, ltype, TJoinDistributionMode::NONE);
     DCHECK(filter != nullptr);
     if (filter != nullptr) {
         offset += filter->deserialize(version, data + offset);
@@ -544,8 +557,9 @@ Status RuntimeFilterProbeDescriptor::init(ObjectPool* pool, const TRuntimeFilter
     _build_plan_node_id = desc.build_plan_node_id;
     _runtime_filter.store(nullptr);
     _join_mode = desc.build_join_mode;
-    _is_topn_filter = desc.__isset.filter_type && desc.filter_type == TRuntimeFilterBuildType::TOPN_FILTER;
-    _skip_wait = _is_topn_filter;
+    _is_stream_build_filter = desc.__isset.filter_type && (desc.filter_type == TRuntimeFilterBuildType::TOPN_FILTER ||
+                                                           desc.filter_type == TRuntimeFilterBuildType::AGG_FILTER);
+    _skip_wait = _is_stream_build_filter;
     _is_group_colocate_rf = desc.__isset.build_from_group_execution && desc.build_from_group_execution;
 
     bool not_found = true;
@@ -590,7 +604,7 @@ Status RuntimeFilterProbeDescriptor::prepare(RuntimeState* state, RuntimeProfile
     _open_timestamp = UnixMillis();
     _latency_timer = ADD_COUNTER(p, strings::Substitute("JoinRuntimeFilter/$0/latency", _filter_id), TUnit::TIME_NS);
     // not set yet.
-    _latency_timer->set((int64_t)(-1));
+    COUNTER_SET(_latency_timer, (int64_t)(-1));
     return Status::OK();
 }
 
@@ -632,7 +646,7 @@ std::string RuntimeFilterProbeDescriptor::debug_string() const {
         ss << "nullptr";
     }
     ss << ", is_local=" << _is_local;
-    ss << ", is_topn=" << _is_topn_filter;
+    ss << ", is_topn=" << _is_stream_build_filter;
     ss << ", rf=";
     const RuntimeFilter* rf = _runtime_filter.load();
     if (rf != nullptr) {
@@ -711,7 +725,7 @@ void RuntimeFilterProbeCollector::do_evaluate(Chunk* chunk, RuntimeMembershipFil
         RuntimeFilterProbeDescriptor* rf_desc = kv.second;
         const RuntimeFilter* filter = rf_desc->runtime_filter(eval_context.driver_sequence);
         bool skip_topn = eval_context.mode == RuntimeMembershipFilterEvalContext::Mode::M_WITHOUT_TOPN;
-        if ((skip_topn && rf_desc->is_topn_filter()) || filter == nullptr || filter->always_true()) {
+        if ((skip_topn && rf_desc->is_stream_build_filter()) || filter == nullptr || filter->always_true()) {
             continue;
         }
         if (rf_desc->has_push_down_to_storage()) {
@@ -829,12 +843,12 @@ void RuntimeFilterProbeCollector::evaluate(Chunk* chunk, RuntimeMembershipFilter
 
     {
         SCOPED_TIMER(eval_context.join_runtime_filter_timer);
-        eval_context.join_runtime_filter_input_counter->update(before);
+        COUNTER_UPDATE(eval_context.join_runtime_filter_input_counter, before);
         eval_context.run_filter_nums = 0;
         do_evaluate(chunk, eval_context);
         size_t after = chunk->num_rows();
-        eval_context.join_runtime_filter_output_counter->update(after);
-        eval_context.join_runtime_filter_eval_counter->update(eval_context.run_filter_nums);
+        COUNTER_UPDATE(eval_context.join_runtime_filter_output_counter, after);
+        COUNTER_UPDATE(eval_context.join_runtime_filter_eval_counter, eval_context.run_filter_nums);
     }
 }
 
@@ -846,12 +860,12 @@ void RuntimeFilterProbeCollector::evaluate_partial_chunk(Chunk* partial_chunk,
 
     {
         SCOPED_TIMER(eval_context.join_runtime_filter_timer);
-        eval_context.join_runtime_filter_input_counter->update(before);
+        COUNTER_UPDATE(eval_context.join_runtime_filter_input_counter, before);
         eval_context.run_filter_nums = 0;
         do_evaluate_partial_chunk(partial_chunk, eval_context);
         size_t after = partial_chunk->num_rows();
-        eval_context.join_runtime_filter_output_counter->update(after);
-        eval_context.join_runtime_filter_eval_counter->update(eval_context.run_filter_nums);
+        COUNTER_UPDATE(eval_context.join_runtime_filter_output_counter, after);
+        COUNTER_UPDATE(eval_context.join_runtime_filter_eval_counter, eval_context.run_filter_nums);
     }
 }
 
@@ -894,16 +908,16 @@ void RuntimeFilterProbeCollector::update_selectivity(Chunk* chunk, RuntimeMember
     for (auto& kv : _descriptors) {
         RuntimeFilterProbeDescriptor* rf_desc = kv.second;
         const RuntimeFilter* filter = rf_desc->runtime_filter(eval_context.driver_sequence);
-        bool should_use =
-                eval_context.mode == RuntimeMembershipFilterEvalContext::Mode::M_ONLY_TOPN && rf_desc->is_topn_filter();
+        bool should_use = eval_context.mode == RuntimeMembershipFilterEvalContext::Mode::M_ONLY_TOPN &&
+                          rf_desc->is_stream_build_filter();
         if (filter == nullptr || (!should_use && filter->always_true())) {
             continue;
         }
         if (eval_context.mode == RuntimeMembershipFilterEvalContext::Mode::M_WITHOUT_TOPN &&
-            rf_desc->is_topn_filter()) {
+            rf_desc->is_stream_build_filter()) {
             continue;
         } else if (eval_context.mode == RuntimeMembershipFilterEvalContext::Mode::M_ONLY_TOPN &&
-                   !rf_desc->is_topn_filter()) {
+                   !rf_desc->is_stream_build_filter()) {
             continue;
         }
 
@@ -951,7 +965,7 @@ void RuntimeFilterProbeCollector::update_selectivity(Chunk* chunk, RuntimeMember
                     dest[j] = src[j] & dest[j];
                 }
             }
-        } else if (rf_desc->is_topn_filter() &&
+        } else if (rf_desc->is_stream_build_filter() &&
                    eval_context.mode == RuntimeMembershipFilterEvalContext::Mode::M_ONLY_TOPN) {
             seletivity_map.emplace(selectivity, rf_desc);
         }
@@ -1086,7 +1100,7 @@ void RuntimeFilterProbeDescriptor::set_runtime_filter(const RuntimeFilter* rf) {
     _runtime_filter.compare_exchange_strong(expected, rf, std::memory_order_seq_cst, std::memory_order_seq_cst);
     if (_ready_timestamp == 0 && rf != nullptr && _latency_timer != nullptr) {
         _ready_timestamp = UnixMillis();
-        _latency_timer->set((_ready_timestamp - _open_timestamp) * 1000);
+        COUNTER_SET(_latency_timer, (_ready_timestamp - _open_timestamp) * 1000);
     }
 }
 
@@ -1101,6 +1115,7 @@ void RuntimeFilterHelper::create_min_max_value_predicate(ObjectPool* pool, SlotI
                                                          const RuntimeFilter* filter, Expr** min_max_predicate) {
     *min_max_predicate = nullptr;
     if (filter == nullptr) return;
+    if (filter->get_min_max_filter() == nullptr) return;
     // TODO, if you want to enable it for string, pls adapt for low-cardinality string
     if (slot_type == TYPE_CHAR || slot_type == TYPE_VARCHAR) return;
     auto res = type_dispatch_filter(slot_type, (Expr*)nullptr, MinMaxPredicateBuilder(pool, slot_id, filter));

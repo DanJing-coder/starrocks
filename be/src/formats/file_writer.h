@@ -49,12 +49,18 @@ public:
         FileStatistics file_statistics;
         std::string location;
         std::function<void()> rollback_action;
+        std::string extra_data;
+        CommitResult& set_extra_data(std::string extra_data) {
+            this->extra_data = std::move(extra_data);
+            return *this;
+        }
     };
 
     virtual ~FileWriter() = default;
     virtual Status init() = 0;
     virtual int64_t get_written_bytes() = 0;
     virtual int64_t get_allocated_bytes() = 0;
+    virtual int64_t get_flush_batch_size() = 0;
     virtual Status write(Chunk* chunk) = 0;
     virtual CommitResult commit() = 0;
 };

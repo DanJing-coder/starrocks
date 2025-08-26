@@ -74,7 +74,8 @@ enum PersistentIndexFileVersion {
     PERSISTENT_INDEX_VERSION_3,
     PERSISTENT_INDEX_VERSION_4,
     PERSISTENT_INDEX_VERSION_5,
-    PERSISTENT_INDEX_VERSION_6
+    PERSISTENT_INDEX_VERSION_6,
+    PERSISTENT_INDEX_VERSION_7
 };
 
 static constexpr uint64_t NullIndexValue = -1;
@@ -99,14 +100,16 @@ struct IOStat {
     uint64_t flush_or_wal_cost = 0;
     uint64_t compaction_cost = 0;
     uint64_t reload_meta_cost = 0;
+    uint64_t total_file_size = 0;
 
     std::string print_str() {
         return fmt::format(
                 "IOStat read_iops: {} filtered_kv_cnt: {} get_in_shard_cost: {} read_io_bytes: {} "
                 "l0_write_cost: {} "
-                "l1_l2_read_cost: {} flush_or_wal_cost: {} compaction_cost: {} reload_meta_cost: {}",
+                "l1_l2_read_cost: {} flush_or_wal_cost: {} compaction_cost: {} reload_meta_cost: {} total_file_size: "
+                "{}",
                 read_iops, filtered_kv_cnt, get_in_shard_cost, read_io_bytes, l0_write_cost, l1_l2_read_cost,
-                flush_or_wal_cost, compaction_cost, reload_meta_cost);
+                flush_or_wal_cost, compaction_cost, reload_meta_cost, total_file_size);
     }
 };
 
@@ -250,7 +253,7 @@ public:
     // get dump total size of hashmaps of shards
     virtual size_t dump_bound() = 0;
 
-    virtual bool dump(phmap::BinaryOutputArchive& ar) = 0;
+    virtual Status dump(phmap::BinaryOutputArchive& ar) = 0;
 
     // get all key-values pair references by shard, the result will remain valid until next modification
     // |nshard|: number of shard
@@ -280,6 +283,10 @@ public:
     virtual size_t memory_usage() = 0;
 
     virtual Status pk_dump(PrimaryKeyDump* dump, PrimaryIndexDumpPB* dump_pb) = 0;
+
+    virtual void set_mutable_index_format_version(uint32_t ver) = 0;
+
+    virtual Status completeness_check(phmap::BinaryInputArchive& ar) = 0;
 
     static StatusOr<std::unique_ptr<MutableIndex>> create(size_t key_size);
 
@@ -373,7 +380,7 @@ public:
 
     size_t dump_bound();
 
-    bool dump(phmap::BinaryOutputArchive& ar, std::set<uint32_t>& dumped_shard_idxes);
+    Status dump(phmap::BinaryOutputArchive& ar, std::set<uint32_t>& dumped_shard_idxes);
 
     Status commit(MutableIndexMetaPB* meta, const EditVersion& version, const CommitType& type);
 
@@ -407,6 +414,8 @@ public:
     static StatusOr<std::unique_ptr<ShardByLengthMutableIndex>> create(size_t key_size, const std::string& path);
 
     Status pk_dump(PrimaryKeyDump* dump, PrimaryIndexDumpPB* dump_pb);
+
+    Status check_snapshot_file(phmap::BinaryInputArchive& ar, const std::set<uint32_t>& idxes);
 
 private:
     friend class PersistentIndex;
@@ -774,7 +783,8 @@ public:
     // just for unit test
     bool has_bf() { return _l1_vec.empty() ? false : _l1_vec[0]->has_bf(); }
 
-    Status major_compaction(DataDir* data_dir, int64_t tablet_id, std::shared_timed_mutex* mutex);
+    Status major_compaction(DataDir* data_dir, int64_t tablet_id, std::shared_timed_mutex* mutex,
+                            IOStat* stat = nullptr);
 
     Status TEST_major_compaction(PersistentIndexMetaPB& index_meta);
 

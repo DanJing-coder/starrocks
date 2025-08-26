@@ -17,7 +17,6 @@ package com.starrocks.sql.ast;
 
 import com.starrocks.analysis.LiteralExpr;
 import com.starrocks.analysis.NullLiteral;
-import com.starrocks.analysis.ParseNode;
 import com.starrocks.catalog.Type;
 import com.starrocks.common.AnalysisException;
 import com.starrocks.common.util.DateUtils;
@@ -70,7 +69,7 @@ public class PartitionValue implements ParseNode {
         if (isMax()) {
             return LiteralExpr.createInfinity(type, true);
         } else {
-            if (type == Type.DATETIME) {
+            if (type.isDatetime()) {
                 try {
                     return LiteralExpr.create(value, type);
                 } catch (AnalysisException ex) {

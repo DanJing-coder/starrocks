@@ -26,6 +26,7 @@ import com.starrocks.common.DdlException;
 import com.starrocks.common.MetaNotFoundException;
 import com.starrocks.common.StarRocksException;
 import com.starrocks.common.profile.Tracers;
+import com.starrocks.common.tvr.TvrVersionRange;
 import com.starrocks.connector.informationschema.InformationSchemaMetadata;
 import com.starrocks.connector.metadata.MetadataTable;
 import com.starrocks.connector.metadata.MetadataTableType;
@@ -149,9 +150,9 @@ public class CatalogConnectorMetadata implements ConnectorMetadata {
     }
 
     @Override
-    public TableVersionRange getTableVersionRange(String dbName, Table table,
-                                                  Optional<ConnectorTableVersion> startVersion,
-                                                  Optional<ConnectorTableVersion> endVersion) {
+    public TvrVersionRange getTableVersionRange(String dbName, Table table,
+                                                Optional<ConnectorTableVersion> startVersion,
+                                                Optional<ConnectorTableVersion> endVersion) {
         ConnectorMetadata metadata = metadataOfTable(table);
         if (metadata == null) {
             metadata = metadataOfDb(dbName);
@@ -200,7 +201,7 @@ public class CatalogConnectorMetadata implements ConnectorMetadata {
     @Override
     public Statistics getTableStatistics(OptimizerContext session, Table table, Map<ColumnRefOperator, Column> columns,
                                          List<PartitionKey> partitionKeys, ScalarOperator predicate, long limit,
-                                         TableVersionRange version) {
+                                         TvrVersionRange version) {
         return normal.getTableStatistics(session, table, columns, partitionKeys, predicate, limit, version);
     }
 
@@ -220,19 +221,15 @@ public class CatalogConnectorMetadata implements ConnectorMetadata {
     }
 
     @Override
-    public void createDb(String dbName) throws DdlException, AlreadyExistsException {
-        normal.createDb(dbName);
-    }
-
-    @Override
     public boolean dbExists(ConnectContext context, String dbName) {
         ConnectorMetadata metadata = metadataOfDb(dbName);
         return metadata.dbExists(context, dbName);
     }
 
     @Override
-    public void createDb(String dbName, Map<String, String> properties) throws DdlException, AlreadyExistsException {
-        normal.createDb(dbName, properties);
+    public void createDb(ConnectContext context, String dbName, Map<String, String> properties)
+            throws DdlException, AlreadyExistsException {
+        normal.createDb(context, dbName, properties);
     }
 
     @Override
@@ -247,18 +244,28 @@ public class CatalogConnectorMetadata implements ConnectorMetadata {
     }
 
     @Override
-    public boolean createTable(CreateTableStmt stmt) throws DdlException {
-        return normal.createTable(stmt);
+    public boolean createTable(ConnectContext context, CreateTableStmt stmt) throws DdlException {
+        return normal.createTable(context, stmt);
     }
 
     @Override
-    public void dropTable(DropTableStmt stmt) throws DdlException {
-        normal.dropTable(stmt);
+    public void dropTable(ConnectContext context, DropTableStmt stmt) throws DdlException {
+        normal.dropTable(context, stmt);
+    }
+
+    @Override
+    public Procedure getProcedure(DatabaseTableName procedureName) {
+        return normal.getProcedure(procedureName);
     }
 
     @Override
     public void finishSink(String dbName, String table, List<TSinkCommitInfo> commitInfos, String branch) {
         normal.finishSink(dbName, table, commitInfos, branch);
+    }
+
+    @Override
+    public void finishSink(String dbName, String table, List<TSinkCommitInfo> commitInfos, String branch, Object extra) {
+        normal.finishSink(dbName, table, commitInfos, branch, extra);
     }
 
     @Override
@@ -341,13 +348,13 @@ public class CatalogConnectorMetadata implements ConnectorMetadata {
     }
 
     @Override
-    public void createView(CreateViewStmt stmt) throws DdlException {
-        normal.createView(stmt);
+    public void createView(ConnectContext context, CreateViewStmt stmt) throws DdlException {
+        normal.createView(context, stmt);
     }
 
     @Override
-    public void alterView(AlterViewStmt stmt) throws StarRocksException {
-        normal.alterView(stmt);
+    public void alterView(ConnectContext context, AlterViewStmt stmt) throws StarRocksException {
+        normal.alterView(context, stmt);
     }
 
     @Override

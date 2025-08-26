@@ -27,18 +27,20 @@ import com.starrocks.planner.PlanNodeId;
 import com.starrocks.qe.scheduler.DefaultWorkerProvider;
 import com.starrocks.qe.scheduler.NonRecoverableException;
 import com.starrocks.qe.scheduler.WorkerProvider;
+import com.starrocks.server.WarehouseManager;
 import com.starrocks.system.ComputeNode;
 import com.starrocks.thrift.TInternalScanRange;
 import com.starrocks.thrift.TScanRange;
 import com.starrocks.thrift.TScanRangeLocation;
 import com.starrocks.thrift.TScanRangeLocations;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -65,14 +67,16 @@ public class ColocatedBackendSelectorTest {
 
         {
             int maxBucketsPerBeToUseBalancerAssignment = 5;
-            Assert.assertThrows("Backend node not found", NonRecoverableException.class,
-                    () -> checkColocatedAssignment(scanNode, workerProvider, maxBucketsPerBeToUseBalancerAssignment, null));
+            Assertions.assertThrows(NonRecoverableException.class,
+                    () -> checkColocatedAssignment(scanNode, workerProvider, maxBucketsPerBeToUseBalancerAssignment, null),
+                    "Backend node not found");
         }
 
         {
             int maxBucketsPerBeToUseBalancerAssignment = 0;
-            Assert.assertThrows("Backend node not found", NonRecoverableException.class,
-                    () -> checkColocatedAssignment(scanNode, workerProvider, maxBucketsPerBeToUseBalancerAssignment, null));
+            Assertions.assertThrows(NonRecoverableException.class,
+                    () -> checkColocatedAssignment(scanNode, workerProvider, maxBucketsPerBeToUseBalancerAssignment, null),
+                    "Backend node not found");
         }
     }
 
@@ -270,7 +274,8 @@ public class ColocatedBackendSelectorTest {
             throws StarRocksException {
         FragmentScanRangeAssignment assignment = new FragmentScanRangeAssignment();
         ColocatedBackendSelector.Assignment colocatedAssignemnt =
-                new ColocatedBackendSelector.Assignment(scanNodes.get(0), scanNodes.size());
+                new ColocatedBackendSelector.Assignment(scanNodes.get(0).getBucketNums(), scanNodes.size(),
+                        Optional.empty());
 
         for (OlapScanNode scanNode : scanNodes) {
             ColocatedBackendSelector backendSelector =
@@ -318,7 +323,7 @@ public class ColocatedBackendSelectorTest {
         )));
         ImmutableMap<Long, ComputeNode> id2ComputeNode = ImmutableMap.of();
 
-        return new DefaultWorkerProvider(id2Backend, id2ComputeNode, id2Backend, id2ComputeNode, false, 0);
+        return new DefaultWorkerProvider(id2Backend, id2ComputeNode, id2Backend, id2ComputeNode, false,
+                WarehouseManager.DEFAULT_RESOURCE);
     }
-
 }

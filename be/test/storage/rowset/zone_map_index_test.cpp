@@ -39,8 +39,9 @@
 #include <memory>
 #include <string>
 
+#include "cache/object_cache/page_cache.h"
+#include "common/config.h"
 #include "fs/fs_memory.h"
-#include "storage/page_cache.h"
 #include "storage/tablet_schema_helper.h"
 #include "testutil/assert.h"
 
@@ -92,7 +93,6 @@ protected:
         ASSIGN_OR_ABORT(auto rfile, _fs->new_random_access_file(filename))
         opts.read_file = rfile.get();
         opts.use_page_cache = false;
-        opts.kept_in_memory = false;
         OlapReaderStatistics stats;
         opts.stats = &stats;
         ZoneMapIndexReader column_zone_map;
@@ -101,13 +101,12 @@ protected:
         ASSERT_EQ(3, column_zone_map.num_pages());
         const std::vector<ZoneMapPB>& zone_maps = column_zone_map.page_zone_maps();
         ASSERT_EQ(3, zone_maps.size());
-        ASSERT_EQ("aaaa", zone_maps[0].min());
-        ASSERT_EQ("ffff", zone_maps[0].max());
+        size_t pfx = config::enable_string_prefix_zonemap ? (size_t)config::string_prefix_zonemap_prefix_len : 64;
+        check_result_prefix(zone_maps[0], true, true, "aaaa", "ffff", false, true, pfx);
         ASSERT_EQ(false, zone_maps[0].has_null());
         ASSERT_EQ(true, zone_maps[0].has_not_null());
 
-        ASSERT_EQ("aaaaa", zone_maps[1].min());
-        ASSERT_EQ("fffff", zone_maps[1].max());
+        check_result_prefix(zone_maps[1], true, true, "aaaaa", "fffff", true, true, pfx);
         ASSERT_EQ(true, zone_maps[1].has_null());
         ASSERT_EQ(true, zone_maps[1].has_not_null());
 
@@ -119,6 +118,23 @@ protected:
     void load_zone_map(ZoneMapIndexReader& reader, ColumnIndexMetaPB& meta, std::string filename);
     void check_result(const ZoneMapPB& zone_map, bool has_min, bool has_max, const std::string& min,
                       const std::string& max, bool has_null, bool has_not_null);
+
+    // Check with prefix truncation semantics for string zonemap entries: min is prefix; max is prefix possibly with 0xFF.
+    void check_result_prefix(const ZoneMapPB& zone_map, bool has_min, bool has_max, const std::string& min,
+                             const std::string& max, bool has_null, bool has_not_null, size_t prefix_len = 64) {
+        ASSERT_EQ(has_min, zone_map.has_min());
+        ASSERT_EQ(has_max, zone_map.has_max());
+        if (has_min) {
+            const auto& zmin = zone_map.min();
+            ASSERT_TRUE(min.rfind(zmin, 0) == 0 || zmin == min.substr(0, std::min(prefix_len, min.size())));
+            ASSERT_TRUE(zmin <= min);
+        }
+        if (has_max) {
+            ASSERT_TRUE(zone_map.max() >= max);
+        }
+        ASSERT_EQ(has_null, zone_map.has_null());
+        ASSERT_EQ(has_not_null, zone_map.has_not_null());
+    }
 
     std::shared_ptr<MemoryFileSystem> _fs = nullptr;
     std::unique_ptr<MemTracker> _mem_tracker = nullptr;
@@ -146,7 +162,6 @@ void ColumnZoneMapTest::load_zone_map(ZoneMapIndexReader& reader, ColumnIndexMet
     ASSIGN_OR_ABORT(auto rfile, _fs->new_random_access_file(filename))
     opts.read_file = rfile.get();
     opts.use_page_cache = false;
-    opts.kept_in_memory = false;
     OlapReaderStatistics stats;
     opts.stats = &stats;
     ASSERT_TRUE(reader.load(opts, meta.zone_map_index()).value());
@@ -270,12 +285,13 @@ TEST_F(ColumnZoneMapTest, StringResize) {
     const auto& zone_maps = reader.page_zone_maps();
     ASSERT_EQ(2, zone_maps.size());
 
-    check_result(zone_maps[0], true, true, str1, str2, false, true);
-    check_result(zone_maps[1], true, true, str3, str4, false, true);
+    size_t pfx = config::enable_string_prefix_zonemap ? (size_t)config::string_prefix_zonemap_prefix_len : 64;
+    check_result_prefix(zone_maps[0], true, true, str1, str2, false, true, pfx);
+    check_result_prefix(zone_maps[1], true, true, str3, str4, false, true, pfx);
 
     // segment zonemap
     const auto& segment_zonemap = index_meta.zone_map_index().segment_zone_map();
-    check_result(segment_zonemap, true, true, str1, str4, false, true);
+    check_result_prefix(segment_zonemap, true, true, str1, str4, false, true, pfx);
 }
 
 TEST_F(ColumnZoneMapTest, AllNullPage) {
@@ -351,6 +367,7 @@ TEST_F(ColumnZoneMapTest, NormalTestIntPage) {
 TEST_F(ColumnZoneMapTest, NormalTestVarcharPage) {
     TabletColumn varchar_column = create_varchar_key(0);
     TypeInfoPtr type_info = get_type_info(varchar_column);
+    // Use prefix check inside test_string by reading page checks
     test_string("NormalTestVarcharPage", type_info);
 }
 
@@ -359,6 +376,143 @@ TEST_F(ColumnZoneMapTest, NormalTestCharPage) {
     TabletColumn char_column = create_char_key(0);
     TypeInfoPtr type_info = get_type_info(char_column);
     test_string("NormalTestCharPage", type_info);
+}
+
+// Test for varbinary
+TEST_F(ColumnZoneMapTest, NormalTestVarbinaryPage) {
+    TabletColumn varbinary_column = create_varbinary_key(0);
+    TypeInfoPtr type_info = get_type_info(varbinary_column);
+    test_string("NormalTestVarbinaryPage", type_info);
+}
+
+// Test for varbinary with binary data
+TEST_F(ColumnZoneMapTest, VarbinaryWithBinaryData) {
+    std::string filename = kTestDir + "/VarbinaryWithBinaryData";
+
+    TabletColumn varbinary_column = create_varbinary_key(0);
+    TypeInfoPtr type_info = get_type_info(varbinary_column);
+
+    auto writer = ZoneMapIndexWriter::create(type_info.get());
+
+    // Add binary data with various patterns
+    std::vector<std::string> binary_values1 = {
+            std::string("\x00\x01\x02\x03", 4), // Binary data starting with null bytes
+            std::string("\xFF\xFE\xFD\xFC", 4), // Binary data with high bytes
+            std::string("ABCD", 4),             // ASCII data
+            std::string("\x00\x00\x00\x00", 4), // All null bytes
+    };
+
+    for (auto& value : binary_values1) {
+        Slice slice(value);
+        writer->add_values((const uint8_t*)&slice, 1);
+    }
+    writer->flush();
+
+    // Add more binary data with different patterns
+    std::vector<std::string> binary_values2 = {
+            std::string("\x01\x02\x03\x04", 4), std::string("\xFE\xFD\xFC\xFB", 4), std::string("EFGH", 4),
+            std::string("\xFF\xFF\xFF\xFF", 4), // All high bytes
+    };
+
+    for (auto& value : binary_values2) {
+        Slice slice(value);
+        writer->add_values((const uint8_t*)&slice, 1);
+    }
+    writer->add_nulls(1);
+    writer->flush();
+
+    // Add null values
+    writer->add_nulls(3);
+    writer->flush();
+
+    // Write out zone map index
+    ColumnIndexMetaPB index_meta;
+    write_file(*writer, index_meta, filename);
+
+    // Read and verify
+    ZoneMapIndexReader column_zone_map;
+    load_zone_map(column_zone_map, index_meta, filename);
+
+    ASSERT_EQ(3, column_zone_map.num_pages());
+    const std::vector<ZoneMapPB>& zone_maps = column_zone_map.page_zone_maps();
+    ASSERT_EQ(3, zone_maps.size());
+
+    // Check first page - should have min/max from binary_values1
+    // For binary data, comparison is byte-by-byte, so "\x00\x00\x00\x00" is min and "\xFF\xFE\xFD\xFC" is max
+    check_result(zone_maps[0], true, true, std::string("\x00\x00\x00\x00", 4), std::string("\xFF\xFE\xFD\xFC", 4),
+                 false, true);
+
+    // Check second page - should have min/max from binary_values2 plus null
+    // "\x01\x02\x03\x04" is min and "\xFF\xFF\xFF\xFF" is max
+    check_result(zone_maps[1], true, true, std::string("\x01\x02\x03\x04", 4), std::string("\xFF\xFF\xFF\xFF", 4), true,
+                 true);
+
+    // Check third page - should be all nulls
+    check_result(zone_maps[2], false, false, "", "", true, false);
+
+    // Check segment zonemap - should cover all data
+    // The segment zonemap should have the overall min/max across all pages
+    const auto& segment_zonemap = index_meta.zone_map_index().segment_zone_map();
+    check_result(segment_zonemap, true, true, std::string("\x00\x00\x00\x00", 4), std::string("\xFF\xFF\xFF\xFF", 4),
+                 true, true);
+}
+
+TEST_F(ColumnZoneMapTest, StringPrefixZonemapVariants) {
+    // Enable string prefix zonemap for this test context
+    bool old_switch = config::enable_string_prefix_zonemap;
+    int old_len = config::string_prefix_zonemap_prefix_len;
+    config::enable_string_prefix_zonemap = true;
+    config::string_prefix_zonemap_prefix_len = 16;
+
+    // Build a segment with various string lengths and patterns
+    std::string filename = kTestDir + "/StringPrefixZonemapVariants";
+
+    TabletColumn varchar_column = create_varchar_key(0);
+    TypeInfoPtr type_info = get_type_info(varchar_column);
+
+    auto writer = ZoneMapIndexWriter::create(type_info.get());
+
+    // Short strings
+    std::vector<Slice> shorts = {{"a", 1}, {"b", 1}, {"c", 1}};
+    writer->add_values(shorts.data(), shorts.size());
+    writer->flush();
+
+    // Common prefix strings
+    std::vector<std::string> cp = {"prefix_0001", "prefix_0002", "prefix_9999"};
+    std::vector<Slice> cp_slices;
+    for (auto& s : cp) cp_slices.push_back({s.data(), s.size()});
+    writer->add_values(cp_slices.data(), cp_slices.size());
+    writer->flush();
+
+    // Random long strings (> 64 to ensure truncation even if config changes)
+    std::string long1(80, 'X');
+    std::string long2(120, 'Y');
+    std::vector<Slice> longs = {{long1.data(), long1.size()}, {long2.data(), long2.size()}};
+    writer->add_values(longs.data(), longs.size());
+    writer->flush();
+
+    // Write index out
+    ColumnIndexMetaPB index_meta;
+    write_file(*writer, index_meta, filename);
+
+    // Read back
+    ZoneMapIndexReader reader;
+    load_zone_map(reader, index_meta, filename);
+
+    ASSERT_EQ(3, reader.num_pages());
+    const auto& zone_maps = reader.page_zone_maps();
+    size_t pfx = (size_t)config::string_prefix_zonemap_prefix_len;
+
+    // Page 0: shorts
+    check_result_prefix(zone_maps[0], true, true, "a", "c", false, true, pfx);
+    // Page 1: common prefix
+    check_result_prefix(zone_maps[1], true, true, cp.front(), cp.back(), false, true, pfx);
+    // Page 2: long strings
+    check_result_prefix(zone_maps[2], true, true, long1, long2, false, true, pfx);
+
+    // Restore config
+    config::enable_string_prefix_zonemap = old_switch;
+    config::string_prefix_zonemap_prefix_len = old_len;
 }
 
 } // namespace starrocks

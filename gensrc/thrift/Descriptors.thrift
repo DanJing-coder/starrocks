@@ -171,9 +171,9 @@ enum TSchemaTableType {
     SCH_FE_METRICS,
     STARROCKS_OBJECT_DEPENDENCIES,
     SYS_FE_LOCKS,
-    SCH_BE_DATACACHE_METRICS,
-    SCH_PARTITIONS_META,
     SYS_FE_MEMORY_USAGE,
+    SCH_PARTITIONS_META,
+    SCH_BE_DATACACHE_METRICS,
     SCH_TEMP_TABLES,
     
     SCH_COLUMN_STATS_USAGE,
@@ -187,6 +187,8 @@ enum TSchemaTableType {
 
     SCH_WAREHOUSE_METRICS,
     SCH_WAREHOUSE_QUERIES,
+
+    SCH_DYNAMIC_TABLET_JOBS,
 }
 
 enum THdfsCompression {
@@ -243,6 +245,10 @@ struct TColumn {
 struct TOlapTableIndexTablets {
     1: required i64 index_id
     2: required list<i64> tablets
+
+    // Virtual buckets. There is a tablet id for each virtual bucket,
+    // which means this virtual bucket's data is stored in this tablet.
+    3: optional list<i64> virtual_buckets
 }
 
 // its a closed-open range
@@ -252,8 +258,8 @@ struct TOlapTablePartition {
     2: optional Exprs.TExprNode start_key
     3: optional Exprs.TExprNode end_key
 
-    // how many tablets in one partition
-    4: required i32 num_buckets
+    // Deprecated, different indexes could have different buckets
+    4: optional i32 deprecated_num_buckets = 0
 
     5: required list<TOlapTableIndexTablets> indexes
 
@@ -484,6 +490,7 @@ struct TTableFunctionTable {
     9: optional string csv_column_seperator
 
     10: optional bool parquet_use_legacy_encoding
+    11: optional Types.TParquetOptions parquet_options
 }
 
 struct TIcebergSchemaField {
@@ -514,6 +521,19 @@ struct TCompressedPartitionMap {
     3: optional string compressed_serialized_partitions
 }
 
+struct TIcebergPartitionInfo {
+    1: optional string source_column_name
+    2: optional string partition_column_name
+    3: optional string transform_expr
+    4: optional Exprs.TExpr partition_expr
+}
+
+struct TSortOrder {
+    1: optional list<i32> sort_key_idxes
+    2: optional list<bool> is_ascs;
+    3: optional list<bool> is_null_firsts;
+}
+
 struct TIcebergTable {
     // table location
     1: optional string location
@@ -525,7 +545,7 @@ struct TIcebergTable {
     3: optional TIcebergSchema iceberg_schema
 
     // partition column names
-    4: optional list<string> partition_column_names
+    4: optional list<string> partition_column_names //Deprecated, move to TIcebergPartitionInfo
 
     // partition map may be very big, serialize costs too much, just use serialized byte[]
     5: optional TCompressedPartitionMap compressed_partitions
@@ -535,6 +555,11 @@ struct TIcebergTable {
 
     // Iceberg equality delete schema, used to support schema evolution
     7: optional TIcebergSchema iceberg_equal_delete_schema
+
+    8: optional list<TIcebergPartitionInfo> partition_info
+
+    // Iceberg sort order, used to sort data before writing to Iceberg
+    9: optional TSortOrder sort_order
 }
 
 struct THudiTable {

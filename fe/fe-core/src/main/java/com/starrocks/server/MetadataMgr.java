@@ -44,20 +44,23 @@ import com.starrocks.common.MaterializedViewExceptions;
 import com.starrocks.common.MetaNotFoundException;
 import com.starrocks.common.StarRocksException;
 import com.starrocks.common.profile.Tracers;
+import com.starrocks.common.tvr.TvrTableSnapshot;
+import com.starrocks.common.tvr.TvrVersionRange;
 import com.starrocks.connector.CatalogConnector;
 import com.starrocks.connector.ConnectorMetadatRequestContext;
 import com.starrocks.connector.ConnectorMetadata;
 import com.starrocks.connector.ConnectorMgr;
 import com.starrocks.connector.ConnectorTableVersion;
 import com.starrocks.connector.ConnectorTblMetaInfoMgr;
+import com.starrocks.connector.DatabaseTableName;
 import com.starrocks.connector.GetRemoteFilesParams;
 import com.starrocks.connector.MetaPreparationItem;
 import com.starrocks.connector.PartitionInfo;
+import com.starrocks.connector.Procedure;
 import com.starrocks.connector.RemoteFileInfo;
 import com.starrocks.connector.RemoteFileInfoDefaultSource;
 import com.starrocks.connector.RemoteFileInfoSource;
 import com.starrocks.connector.SerializedMetaSpec;
-import com.starrocks.connector.TableVersionRange;
 import com.starrocks.connector.exception.StarRocksConnectorException;
 import com.starrocks.connector.metadata.MetadataTable;
 import com.starrocks.connector.metadata.MetadataTableType;
@@ -65,6 +68,7 @@ import com.starrocks.connector.statistics.ConnectorTableColumnStats;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.sql.ast.AlterTableStmt;
 import com.starrocks.sql.ast.AlterViewStmt;
+import com.starrocks.sql.ast.CallProcedureStatement;
 import com.starrocks.sql.ast.CleanTemporaryTableStmt;
 import com.starrocks.sql.ast.CreateTableLikeStmt;
 import com.starrocks.sql.ast.CreateTableStmt;
@@ -229,11 +233,11 @@ public class MetadataMgr {
         return ImmutableList.copyOf(dbNames.build());
     }
 
-    public void createDb(String catalogName, String dbName, Map<String, String> properties)
+    public void createDb(ConnectContext context, String catalogName, String dbName, Map<String, String> properties)
             throws DdlException, AlreadyExistsException {
         Optional<ConnectorMetadata> connectorMetadata = getOptionalMetadata(catalogName);
         if (connectorMetadata.isPresent()) {
-            connectorMetadata.get().createDb(dbName, properties);
+            connectorMetadata.get().createDb(context, dbName, properties);
         }
     }
 
@@ -297,7 +301,7 @@ public class MetadataMgr {
                     }
                 }
             }
-            return connectorMetadata.get().createTable(stmt);
+            return connectorMetadata.get().createTable(context, stmt);
         } else {
             throw new DdlException("Invalid catalog " + catalogName + " , ConnectorMetadata doesn't exist");
         }
@@ -324,7 +328,7 @@ public class MetadataMgr {
         }
     }
 
-    public boolean createTemporaryTable(CreateTemporaryTableStmt stmt) throws DdlException {
+    public boolean createTemporaryTable(ConnectContext context, CreateTemporaryTableStmt stmt) throws DdlException {
         Preconditions.checkArgument(stmt.getSessionId() != null,
                 "session id should not be null in CreateTemporaryTableStmt");
         String catalogName = stmt.getCatalogName();
@@ -354,16 +358,16 @@ public class MetadataMgr {
                     ErrorReport.reportDdlException(ErrorCode.ERR_TABLE_EXISTS_ERROR, tableName);
                 }
             }
-            return connectorMetadata.get().createTable(stmt);
+            return connectorMetadata.get().createTable(context, stmt);
         }
     }
 
-    public void createView(CreateViewStmt stmt) throws DdlException {
+    public void createView(ConnectContext context, CreateViewStmt stmt) throws DdlException {
         String catalogName = stmt.getCatalog();
         Optional<ConnectorMetadata> connectorMetadata = getOptionalMetadata(catalogName);
 
         if (connectorMetadata.isPresent()) {
-            connectorMetadata.get().createView(stmt);
+            connectorMetadata.get().createView(context, stmt);
         }
     }
 
@@ -388,22 +392,22 @@ public class MetadataMgr {
         }
     }
 
-    public void alterView(AlterViewStmt stmt) throws StarRocksException {
+    public void alterView(ConnectContext context, AlterViewStmt stmt) throws StarRocksException {
         String catalogName = stmt.getCatalog();
         Optional<ConnectorMetadata> connectorMetadata = getOptionalMetadata(catalogName);
 
         if (connectorMetadata.isPresent()) {
-            connectorMetadata.get().alterView(stmt);
+            connectorMetadata.get().alterView(context, stmt);
         }
     }
 
     public void dropTable(String catalogName, String dbName, String tblName) {
         TableName tableName = new TableName(catalogName, dbName, tblName);
         DropTableStmt dropTableStmt = new DropTableStmt(false, tableName, false);
-        dropTable(dropTableStmt);
+        dropTable(ConnectContext.get(), dropTableStmt);
     }
 
-    public void dropTable(DropTableStmt stmt) {
+    public void dropTable(ConnectContext context, DropTableStmt stmt) {
         String catalogName = stmt.getCatalogName();
         String dbName = stmt.getDbName();
         String tableName = stmt.getTableName();
@@ -411,7 +415,7 @@ public class MetadataMgr {
         Optional<ConnectorMetadata> connectorMetadata = getOptionalMetadata(catalogName);
         connectorMetadata.ifPresent(metadata -> {
             try {
-                metadata.dropTable(stmt);
+                metadata.dropTable(context, stmt);
             } catch (DdlException e) {
                 LOG.error("Failed to drop table {}.{}.{}", catalogName, dbName, tableName, e);
                 throw new StarRocksConnectorException("Failed to drop table %s.%s.%s. msg: %s",
@@ -519,12 +523,12 @@ public class MetadataMgr {
         return connectorTable;
     }
 
-    public TableVersionRange getTableVersionRange(String dbName, Table table,
-                                                  Optional<ConnectorTableVersion> startVersion,
-                                                  Optional<ConnectorTableVersion> endVersion) {
+    public TvrVersionRange getTableVersionRange(String dbName, Table table,
+                                                Optional<ConnectorTableVersion> startVersion,
+                                                Optional<ConnectorTableVersion> endVersion) {
         Optional<ConnectorMetadata> connectorMetadata = getOptionalMetadata(table.getCatalogName());
         return connectorMetadata.map(metadata -> metadata.getTableVersionRange(dbName, table, startVersion, endVersion))
-                .orElse(TableVersionRange.empty().empty());
+                .orElse(TvrTableSnapshot.empty());
     }
 
     public Optional<Database> getDatabase(ConnectContext context, BaseTableInfo baseTableInfo) {
@@ -563,7 +567,7 @@ public class MetadataMgr {
         if (tableOpt.isPresent()) {
             return tableOpt.get();
         }
-        throw MaterializedViewExceptions.reportBaseTableNotExists(baseTableInfo);
+        throw MaterializedViewExceptions.reportBaseTableNotExists(baseTableInfo.getTableName());
     }
 
     public Table getTemporaryTable(UUID sessionId, String catalogName, Long databaseId, String tblName) {
@@ -692,7 +696,7 @@ public class MetadataMgr {
                                          List<PartitionKey> partitionKeys,
                                          ScalarOperator predicate,
                                          long limit,
-                                         TableVersionRange versionRange) {
+                                         TvrVersionRange versionRange) {
         // FIXME: In testing env, `_statistics_.external_column_statistics` is not created, ignore query columns stats from it.
         // Get basic/histogram stats from internal statistics.
         Statistics internalStatistics = FeConstants.runningUnitTest ? null :
@@ -741,7 +745,8 @@ public class MetadataMgr {
                                          Map<ColumnRefOperator, Column> columns,
                                          List<PartitionKey> partitionKeys,
                                          ScalarOperator predicate) {
-        return getTableStatistics(session, catalogName, table, columns, partitionKeys, predicate, -1, TableVersionRange.empty());
+        return getTableStatistics(session, catalogName, table, columns, partitionKeys, predicate, -1,
+                TvrTableSnapshot.empty());
     }
 
     public List<PartitionInfo> getRemotePartitions(Table table, List<String> partitionNames) {
@@ -857,6 +862,19 @@ public class MetadataMgr {
         });
     }
 
+    public void finishSink(String catalogName, String dbName, String tableName,
+                           List<TSinkCommitInfo> sinkCommitInfos, String branch, Object extra) {
+        Optional<ConnectorMetadata> connectorMetadata = getOptionalMetadata(catalogName);
+        connectorMetadata.ifPresent(metadata -> {
+            try {
+                metadata.finishSink(dbName, tableName, sinkCommitInfos, branch, extra);
+            } catch (StarRocksConnectorException e) {
+                LOG.error("table sink commit failed", e);
+                throw new StarRocksConnectorException(e.getMessage());
+            }
+        });
+    }
+
     public void abortSink(String catalogName, String dbName, String tableName, List<TSinkCommitInfo> sinkCommitInfos) {
         Optional<ConnectorMetadata> connectorMetadata = getOptionalMetadata(catalogName);
         connectorMetadata.ifPresent(metadata -> {
@@ -867,5 +885,18 @@ public class MetadataMgr {
                 throw new StarRocksConnectorException(e.getMessage());
             }
         });
+    }
+
+    public Optional<Procedure> getProcedure(String catalogName, String dbName, String procedureName) {
+        Optional<ConnectorMetadata> connectorMetadata = getOptionalMetadata(catalogName);
+        return connectorMetadata.map(metadata -> metadata.getProcedure(DatabaseTableName.of(dbName, procedureName)));
+    }
+
+    public void callProcedure(CallProcedureStatement stmt, ConnectContext context) {
+        Procedure procedure = stmt.getProcedure();
+        if (procedure == null) {
+            throw new StarRocksConnectorException("Procedure not found: %s", stmt.getQualifiedName());
+        }
+        procedure.execute(context, stmt.getAnalyzedArguments());
     }
 }

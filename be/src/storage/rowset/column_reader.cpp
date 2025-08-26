@@ -353,7 +353,6 @@ Status ColumnReader::read_page(const ColumnIteratorOptions& iter_opts, const Pag
     opts.verify_checksum = true;
     opts.use_page_cache = iter_opts.use_page_cache;
     opts.encoding_type = _encoding_info->encoding();
-    opts.kept_in_memory = false;
 
     return PageIO::read_and_decompress_page(opts, handle, page_body, footer);
 }
@@ -825,8 +824,9 @@ StatusOr<std::unique_ptr<ColumnIterator>> ColumnReader::_new_json_iterator(Colum
         }
         // dynamic flattern
         // we must dynamic flat json, because we don't know other segment wasn't the paths
-        return create_json_dynamic_flat_iterator(std::move(json_iter), target_paths, target_types,
-                                                 path->is_from_compaction());
+        return create_json_dynamic_flat_iterator(
+                std::move(json_iter), target_paths, target_types,
+                path->is_from_compaction() || (column != nullptr && column->is_extended()));
     }
 
     std::vector<std::string> source_paths;

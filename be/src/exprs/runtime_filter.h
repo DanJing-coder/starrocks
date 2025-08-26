@@ -26,6 +26,7 @@
 #include "column/vectorized_fwd.h"
 #include "common/global_types.h"
 #include "common/object_pool.h"
+#include "exec/partition/bucket_aware_partition.h"
 #include "exec/pipeline/exchange/shuffler.h"
 #include "exprs/runtime_filter_layout.h"
 #include "gen_cpp/PlanNodes_types.h"
@@ -43,7 +44,14 @@ inline const constexpr uint8_t RF_VERSION = 0x2; // deprecated
 inline const constexpr uint8_t RF_VERSION_V2 = 0x3;
 // Serialize format: RF_VERSION (1B) | RuntimeFilterType (1B) | RuntimeFilter(LogicalType | other content)
 inline const constexpr uint8_t RF_VERSION_V3 = 0x4;
-enum class RuntimeFilterSerializeType : uint8_t { NONE = 0, EMPTY_FILTER = 1, BLOOM_FILTER = 2, BITSET_FILTER = 3 };
+enum class RuntimeFilterSerializeType : uint8_t {
+    NONE = 0,
+    EMPTY_FILTER = 1,
+    BLOOM_FILTER = 2,
+    BITSET_FILTER = 3,
+    IN_FILTER = 4,
+    UNKNOWN_FILTER,
+};
 static_assert(sizeof(RF_VERSION_V3) == sizeof(RF_VERSION));
 static_assert(sizeof(RF_VERSION_V3) == sizeof(RF_VERSION_V2));
 inline const constexpr int32_t RF_VERSION_SZ = sizeof(RF_VERSION_V3);
@@ -59,6 +67,8 @@ inline std::string to_string(RuntimeFilterSerializeType type) {
         return "BloomFilter";
     case RuntimeFilterSerializeType::BITSET_FILTER:
         return "BitsetFilter";
+    case RuntimeFilterSerializeType::IN_FILTER:
+        return "InFilter";
     case RuntimeFilterSerializeType::NONE:
     default:
         return "None";
@@ -237,6 +247,9 @@ public:
         bool use_merged_selection;
         bool compatibility = true;
         std::vector<uint32_t> hash_values;
+        std::vector<uint32_t> round_hashes;
+        std::vector<uint32_t> bucket_ids;
+        std::vector<uint32_t> round_ids;
     };
 
     virtual RuntimeFilterSerializeType type() const { return RuntimeFilterSerializeType::NONE; }
@@ -313,6 +326,7 @@ public:
     std::vector<RuntimeFilter*>& group_colocate_filter() { return _group_colocate_filters; }
     const std::vector<RuntimeFilter*>& group_colocate_filter() const { return _group_colocate_filters; }
 
+    virtual const RuntimeFilter* get_in_filter() const { return nullptr; }
     virtual const RuntimeFilter* get_min_max_filter() const {
         DCHECK(false) << "unreachable path";
         return nullptr;
@@ -349,6 +363,12 @@ concept HashValueForEachFunc = requires(F f, size_t index, uint32_t& hash_value)
     ->std::same_as<void>;
 };
 
+template <typename F>
+concept HashValueAndBucketIdForEachFunc = requires(F f, size_t index, uint32_t& hash_value, uint32_t& bucket_id) {
+    { f(index, hash_value, bucket_id) }
+    ->std::same_as<void>;
+};
+
 struct FullScanIterator {
     typedef void (Column::*HashFuncType)(uint32_t*, uint32_t, uint32_t) const;
     static constexpr HashFuncType FNV_HASH = &Column::fnv_hash;
@@ -371,6 +391,22 @@ struct FullScanIterator {
     }
 
     std::vector<uint32_t>& hash_values;
+    size_t num_rows;
+};
+
+struct BucketAwareFullScanIterator {
+    BucketAwareFullScanIterator(BucketAwarePartitionCtx& ctx, size_t num_rows) : ctx(ctx), num_rows(num_rows) {}
+
+    template <HashValueAndBucketIdForEachFunc ForEachFuncType>
+    void for_each(ForEachFuncType func) {
+        for (size_t i = 0; i < num_rows; i++) {
+            func(i, ctx.hash_values[i], ctx.bucket_ids[i]);
+        }
+    }
+
+    void compute_hash(const std::vector<const Column*>& columns) { calc_hash_values_and_bucket_ids(columns, ctx); }
+
+    BucketAwarePartitionCtx& ctx;
     size_t num_rows;
 };
 
@@ -495,6 +531,41 @@ struct WithModuloArg {
     };
 };
 
+template <>
+struct WithModuloArg<ModuloOp, BucketAwareFullScanIterator> {
+    template <TRuntimeFilterLayoutMode::type M>
+    struct HashValueCompute {
+        void operator()(const RuntimeFilterLayout& layout, const std::vector<const Column*>& columns,
+                        size_t real_num_partitions, BucketAwareFullScanIterator iterator) const {
+            if constexpr (layout_is_singleton<M>) {
+                iterator.for_each([&](size_t i, uint32_t& hash_value, uint32_t& bucket_id) { hash_value = 0; });
+                return;
+            }
+            if constexpr (layout_is_bucket<M>) {
+                [[maybe_unused]] const auto& bucketseq_to_instance = layout.bucketseq_to_instance();
+                [[maybe_unused]] const auto num_drivers_per_instance = layout.num_drivers_per_instance();
+                iterator.compute_hash(columns);
+                iterator.for_each([&](size_t i, uint32_t& hash_value, uint32_t& bucket_id) {
+                    if constexpr (layout_is_pipeline_bucket_lx<M>) {
+                        hash_value = ModuloOp()(HashUtil::xorshift32(hash_value), num_drivers_per_instance);
+                    } else if constexpr (layout_is_global_bucket_1l<M>) {
+                        hash_value = bucketseq_to_instance[bucket_id];
+                    } else if constexpr (layout_is_global_bucket_2l_lx<M>) {
+                        const auto instance = bucketseq_to_instance[bucket_id];
+                        const auto driverseq = ModuloOp()(HashUtil::xorshift32(hash_value), num_drivers_per_instance);
+                        hash_value = (instance == BUCKET_ABSENT) ? BUCKET_ABSENT
+                                                                 : instance * num_drivers_per_instance + driverseq;
+                    } else {
+                        DCHECK(false);
+                    }
+                });
+            } else {
+                DCHECK(false);
+            }
+        }
+    };
+};
+
 template <LogicalType Type>
 class MinMaxRuntimeFilter final : public RuntimeFilter {
 public:
@@ -537,6 +608,14 @@ public:
     static MinMaxRuntimeFilter* create_with_full_range_without_null(ObjectPool* pool) {
         auto* rf = pool->add(new MinMaxRuntimeFilter());
         rf->_init_full_range();
+        rf->_always_true = true;
+        return rf;
+    }
+
+    static MinMaxRuntimeFilter* create_full_range_with_null(ObjectPool* pool) {
+        auto* rf = pool->add(new MinMaxRuntimeFilter());
+        rf->_init_full_range();
+        rf->insert_null();
         rf->_always_true = true;
         return rf;
     }
@@ -1257,8 +1336,16 @@ public:
             dispatch_layout<WithModuloArg<ReduceOp, FullScanIterator>::HashValueCompute>(
                     _global, layout, columns, _hash_partition_bf.size(), FullScanIterator(_hash_values, num_rows));
         } else {
-            dispatch_layout<WithModuloArg<ModuloOp, FullScanIterator>::HashValueCompute>(
-                    _global, layout, columns, _hash_partition_bf.size(), FullScanIterator(_hash_values, num_rows));
+            if (layout.bucket_properties().empty()) {
+                dispatch_layout<WithModuloArg<ModuloOp, FullScanIterator>::HashValueCompute>(
+                        _global, layout, columns, _hash_partition_bf.size(), FullScanIterator(_hash_values, num_rows));
+            } else {
+                BucketAwarePartitionCtx bctx(layout.bucket_properties(), ctx->hash_values, ctx->round_hashes,
+                                             ctx->bucket_ids, ctx->round_ids);
+                dispatch_layout<WithModuloArg<ModuloOp, BucketAwareFullScanIterator>::HashValueCompute>(
+                        _global, layout, columns, _hash_partition_bf.size(),
+                        BucketAwareFullScanIterator(bctx, num_rows));
+            }
         }
     }
     void compute_partition_index(const RuntimeFilterLayout& layout, const std::vector<const Column*>& columns,

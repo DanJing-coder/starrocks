@@ -46,13 +46,13 @@
 #include "agent/publish_version.h"
 #include "agent/task_worker_pool.h"
 #include "brpc/errno.pb.h"
-#include "cache/block_cache/block_cache.h"
+#include "cache/datacache.h"
 #include "column/stream_chunk.h"
 #include "common/closure_guard.h"
 #include "common/config.h"
 #include "common/process_exit.h"
 #include "common/status.h"
-#include "exec/file_scanner.h"
+#include "exec/file_scanner/file_scanner.h"
 #include "exec/pipeline/fragment_context.h"
 #include "exec/pipeline/fragment_executor.h"
 #include "exec/pipeline/pipeline_driver_executor.h"
@@ -87,6 +87,7 @@
 #include "util/stopwatch.hpp"
 #include "util/thrift_util.h"
 #include "util/time.h"
+#include "util/time_guard.h"
 #include "util/uid_util.h"
 
 namespace starrocks {
@@ -305,7 +306,7 @@ void PInternalServiceImplBase<T>::_exec_plan_fragment(google::protobuf::RpcContr
         return;
     }
 
-    auto st = _exec_plan_fragment(cntl, request);
+    auto st = _exec_plan_fragment(cntl, request, response);
     if (!st.ok()) {
         LOG(WARNING) << "exec plan fragment failed, errmsg=" << st.message();
     }
@@ -421,14 +422,29 @@ void PInternalServiceImplBase<T>::tablet_writer_cancel(google::protobuf::RpcCont
                                                        PTabletWriterCancelResult* response,
                                                        google::protobuf::Closure* done) {}
 
+static void copy_result_from_thrift_to_protobuf(const TExecPlanFragmentResult& t_response,
+                                                PExecPlanFragmentResult* p_response) {
+    if (t_response.__isset.closed_scan_nodes) {
+        for (auto v : t_response.closed_scan_nodes) {
+            p_response->add_closed_scan_nodes(v);
+        }
+    }
+}
+
+template <typename T>
+void PInternalServiceImplBase<T>::get_load_replica_status(google::protobuf::RpcController* controller,
+                                                          const PLoadReplicaStatusRequest* request,
+                                                          PLoadReplicaStatusResult* response,
+                                                          google::protobuf::Closure* done) {}
+
 template <typename T>
 void PInternalServiceImplBase<T>::load_diagnose(google::protobuf::RpcController* controller,
                                                 const PLoadDiagnoseRequest* request, PLoadDiagnoseResult* response,
                                                 google::protobuf::Closure* done) {}
 
 template <typename T>
-Status PInternalServiceImplBase<T>::_exec_plan_fragment(brpc::Controller* cntl,
-                                                        const PExecPlanFragmentRequest* request) {
+Status PInternalServiceImplBase<T>::_exec_plan_fragment(brpc::Controller* cntl, const PExecPlanFragmentRequest* request,
+                                                        PExecPlanFragmentResult* response) {
     auto ser_request = cntl->request_attachment().to_string();
     TExecPlanFragmentParams t_request;
     {
@@ -438,7 +454,10 @@ Status PInternalServiceImplBase<T>::_exec_plan_fragment(brpc::Controller* cntl,
     }
     // incremental scan ranges deployment.
     if (!t_request.__isset.fragment) {
-        return pipeline::FragmentExecutor::append_incremental_scan_ranges(_exec_env, t_request);
+        TExecPlanFragmentResult t_result;
+        Status code = pipeline::FragmentExecutor::append_incremental_scan_ranges(_exec_env, t_request, &t_result);
+        copy_result_from_thrift_to_protobuf(t_result, response);
+        return code;
     }
 
     if (UNLIKELY(!t_request.query_options.__isset.batch_size)) {
@@ -473,6 +492,7 @@ Status PInternalServiceImplBase<T>::_exec_plan_fragment(brpc::Controller* cntl,
 template <typename T>
 Status PInternalServiceImplBase<T>::_exec_plan_fragment_by_pipeline(const TExecPlanFragmentParams& t_common_param,
                                                                     const TExecPlanFragmentParams& t_unique_request) {
+    SignalTimerGuard guard(config::pipeline_prepare_timeout_guard_ms);
     pipeline::FragmentExecutor fragment_executor;
     auto status = fragment_executor.prepare(_exec_env, t_common_param, t_unique_request);
     if (status.ok()) {
@@ -631,7 +651,7 @@ void PInternalServiceImplBase<T>::_fetch_datacache(google::protobuf::RpcControll
                << ", cache_key: " << HashUtil::hash(request->cache_key().data(), request->cache_key().size(), 0)
                << ", offset: " << request->offset() << ", size: " << request->size();
 
-    BlockCache* block_cache = CacheEnv::GetInstance()->block_cache();
+    BlockCache* block_cache = DataCache::GetInstance()->block_cache();
     if (!block_cache || !block_cache->available()) {
         st = Status::ServiceUnavailable("block cache is unavailable");
     } else {

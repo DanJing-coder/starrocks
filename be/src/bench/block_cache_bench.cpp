@@ -24,7 +24,7 @@
 #include <filesystem>
 #include <memory>
 
-#include "cache/starcache_wrapper.h"
+#include "cache/starcache_engine.h"
 #include "starcache/common/types.h"
 #include "util/logging.h"
 #include "util/random.h"
@@ -106,7 +106,7 @@ public:
 
     BlockCacheBenchSuite(const CacheOptions& options, const BenchParams& params) {
         _params = new BlockCacheBenchSuite::BenchParams(params);
-        _cache = new StarCacheWrapper;
+        _cache = new StarCacheEngine();
         Status st = _cache->init(options);
         DCHECK(st.ok()) << st.message();
         _ctx = new BenchContext();
@@ -275,7 +275,7 @@ static void BM_bench_starcache(benchmark::State& state, Args&&... args) {
     CacheOptions options;
     options.mem_space_size = 5 * GB;
     options.meta_path = DISK_CACHE_PATH;
-    options.disk_spaces.push_back({.path = DISK_CACHE_PATH, .size = 1 * GB});
+    options.dir_spaces.push_back({.path = DISK_CACHE_PATH, .size = 1 * GB});
     options.block_size = 4 * MB;
     options.checksum = false;
 
@@ -294,7 +294,7 @@ static void BM_bench_starcache(benchmark::State& state, Args&&... args) {
     CacheOptions options;
     options.mem_space_size = 300 * MB;
     options.meta_path = DISK_CACHE_PATH;
-    options.disk_spaces.push_back({.path = DISK_CACHE_PATH, .size = 10 * GB});
+    options.dir_spaces.push_back({.path = DISK_CACHE_PATH, .size = 10 * GB});
     options.block_size = 4 * MB;
     options.checksum = true;
 
@@ -313,7 +313,7 @@ static void BM_bench_starcache(benchmark::State& state, Args&&... args) {
     CacheOptions options;
     options.mem_space_size = 300 * MB;
     options.meta_path = DISK_CACHE_PATH;
-    options.disk_spaces.push_back({.path = DISK_CACHE_PATH, .size = 10 * GB});
+    options.dir_spaces.push_back({.path = DISK_CACHE_PATH, .size = 10 * GB});
     options.block_size = 4 * MB;
     options.checksum = true;
 
@@ -335,7 +335,7 @@ static void BM_bench_starcache(benchmark::State& state, Args&&... args) {
     options.mem_space_size = 300 * MB;
     //options.mem_space_size = 8000 * MB;
     options.meta_path = DISK_CACHE_PATH;
-    options.disk_spaces.push_back({.path = DISK_CACHE_PATH, .size = 10 * GB});
+    options.dir_spaces.push_back({.path = DISK_CACHE_PATH, .size = 10 * GB});
     options.block_size = 1 * MB;
     options.checksum = true;
 

@@ -31,7 +31,6 @@ import com.starrocks.analysis.Expr;
 import com.starrocks.analysis.FunctionCallExpr;
 import com.starrocks.analysis.GroupByClause;
 import com.starrocks.analysis.GroupingFunctionCallExpr;
-import com.starrocks.analysis.HintNode;
 import com.starrocks.analysis.InPredicate;
 import com.starrocks.analysis.InformationFunction;
 import com.starrocks.analysis.IsNullPredicate;
@@ -43,7 +42,6 @@ import com.starrocks.analysis.MultiInPredicate;
 import com.starrocks.analysis.NamedArgument;
 import com.starrocks.analysis.OrderByElement;
 import com.starrocks.analysis.Parameter;
-import com.starrocks.analysis.ParseNode;
 import com.starrocks.analysis.SetVarHint;
 import com.starrocks.analysis.SlotRef;
 import com.starrocks.analysis.SubfieldExpr;
@@ -196,7 +194,7 @@ public interface AstVisitor<R, C> {
     }
 
     default R visitCreateTemporaryTableAsSelectStatement(CreateTemporaryTableAsSelectStmt statement, C context) {
-        return visitStatement(statement, context);
+        return visitCreateTableAsSelectStatement(statement, context);
     }
 
     default R visitCreateTemporaryTableLikeStatement(CreateTemporaryTableLikeStmt statement, C context) {
@@ -208,7 +206,7 @@ public interface AstVisitor<R, C> {
     }
 
     default R visitDropTemporaryTableStatement(DropTemporaryTableStmt statement, C context) {
-        return visitStatement(statement, context);
+        return visitDropTableStatement(statement, context);
     }
 
     default R visitCleanTemporaryTableStatement(CleanTemporaryTableStmt statement, C context) {
@@ -898,6 +896,19 @@ public interface AstVisitor<R, C> {
         return visitShowStatement(statement, context);
     }
 
+    // --------------------------------------- Compute Node BlackList -------------------------------------
+    default R visitAddComputeNodeBlackListStatement(AddComputeNodeBlackListStmt statement, C context) {
+        return visitStatement(statement, context);
+    }
+
+    default R visitDelComputeNodeBlackListStatement(DelComputeNodeBlackListStmt statement, C context) {
+        return visitStatement(statement, context);
+    }
+
+    default R visitShowComputeNodeBlackListStatement(ShowComputeNodeBlackListStmt statement, C context) {
+        return visitShowStatement(statement, context);
+    }
+
     default R visitExecuteAsStatement(ExecuteAsStmt statement, C context) {
         return visitStatement(statement, context);
     }
@@ -924,7 +935,7 @@ public interface AstVisitor<R, C> {
     }
 
     default R visitDataCacheSelectStatement(DataCacheSelectStatement statement, C context) {
-        return visitStatement(statement, context);
+        return visitDDLStatement(statement, context);
     }
 
     // --------------------------------------- Export Statement --------------------------------------------------------
@@ -1284,6 +1295,10 @@ public interface AstVisitor<R, C> {
     }
 
     default R visitDropFieldClause(DropFieldClause clause, C context) {
+        return visitNode(clause, context);
+    }
+
+    default R visitSplitTabletClause(SplitTabletClause clause, C context) {
         return visitNode(clause, context);
     }
 
@@ -1655,5 +1670,11 @@ public interface AstVisitor<R, C> {
 
     default R visitControlBaselinePlanStatement(ControlBaselinePlanStmt statement, C context) {
         return visitDDLStatement(statement, context);
+    }
+
+    // ------------------------------------------- Procedure Statement -------------------------------------------------
+
+    default R visitCallProcedureStatement(CallProcedureStatement statement, C context) {
+        return visitStatement(statement, context);
     }
 }

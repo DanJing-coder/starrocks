@@ -41,7 +41,6 @@ import com.starrocks.analysis.MatchExpr;
 import com.starrocks.analysis.MultiInPredicate;
 import com.starrocks.analysis.NullLiteral;
 import com.starrocks.analysis.Parameter;
-import com.starrocks.analysis.ParseNode;
 import com.starrocks.analysis.Predicate;
 import com.starrocks.analysis.SlotRef;
 import com.starrocks.analysis.SubfieldExpr;
@@ -67,6 +66,7 @@ import com.starrocks.sql.ast.FieldReference;
 import com.starrocks.sql.ast.LambdaArgument;
 import com.starrocks.sql.ast.LambdaFunctionExpr;
 import com.starrocks.sql.ast.MapExpr;
+import com.starrocks.sql.ast.ParseNode;
 import com.starrocks.sql.ast.QueryRelation;
 import com.starrocks.sql.ast.QueryStatement;
 import com.starrocks.sql.ast.SelectRelation;
@@ -205,7 +205,7 @@ public final class SqlToScalarOperatorTranslator {
     }
 
     public static ScalarOperator translateWithSlotRef(Expr expr,
-                                                      java.util.function.Function<SlotRef, ColumnRefOperator> resolver) {
+                                                      java.util.function.Function<SlotRef, ? extends ScalarOperator> resolver) {
         ResolveSlotVisitor visitor = new ResolveSlotVisitor(resolver);
         return visitor.visit(expr, new Context());
     }
@@ -690,8 +690,8 @@ public final class SqlToScalarOperatorTranslator {
                     .stream()
                     .map(child -> visit(child, context.clone(node)))
                     .toArray(ScalarOperator[]::new);
-
-            return new MatchExprOperator(children);
+            MatchExpr.MatchOperator matchOperator = node.getMatchOperator();
+            return new MatchExprOperator(matchOperator, children);
         }
 
         @Override
@@ -887,9 +887,9 @@ public final class SqlToScalarOperatorTranslator {
      */
     static class ResolveSlotVisitor extends Visitor {
 
-        private final java.util.function.Function<SlotRef, ColumnRefOperator> resolver;
+        private final java.util.function.Function<SlotRef, ? extends ScalarOperator> resolver;
 
-        public ResolveSlotVisitor(java.util.function.Function<SlotRef, ColumnRefOperator> resolver) {
+        public ResolveSlotVisitor(java.util.function.Function<SlotRef, ? extends ScalarOperator> resolver) {
             super(new ExpressionMapping(new Scope(RelationId.anonymous(), new RelationFields())),
                     new ColumnRefFactory(), Collections.emptyList(),
                     null, null, null, null);
@@ -899,7 +899,7 @@ public final class SqlToScalarOperatorTranslator {
         @Override
         public ScalarOperator visitSlot(SlotRef node, Context context) {
             if (!node.isAnalyzed()) {
-                ColumnRefOperator ref = resolver.apply(node);
+                ScalarOperator ref = resolver.apply(node);
                 if (ref != null) {
                     return ref;
                 }

@@ -8,6 +8,15 @@ displayed_sidebar: docs
 
 查看当前集群中的特定指标。
 
+SHOW PROC 相当于 Linux 中的 `/proc` 文件系统。与 `/proc` 中的路径类似，SHOW PROC 中的参数也是树状层次结构，每一层显示不同的信息。以 `SHOW PROC '/dbs'` 为例：
+- `SHOW PROC '/dbs'` 将返回集群中所有数据库的信息。
+- `SHOW PROC '/dbs/<db_name>'` 将返回指定数据库的信息。
+- `SHOW PROC '/dbs/<db_name>/tables'` 将返回指定数据库中所有表的信息。
+- `SHOW PROC '/dbs/<db_name>/<table_name>'` 将返回指定表的信息。
+- `SHOW PROC '/dbs/<db_name>/<table_name>/partitions'` 将返回指定表中所有分区的信息。
+
+SHOW PROC 中的参数可以一直指定到叶节点。
+
 > **注意**
 >
 > 该操作需要 SYSTEM 级 OPERATE 权限。
@@ -29,7 +38,7 @@ SHOW PROC { '/backends' | '/compute_nodes' | '/dbs' | '/jobs'
 | ---------------------------- | ------------------------------------------------------------ |
 | '/backends'                  | 查看当前集群的 BE 节点信息。                                 |
 | '/compute_nodes'             | 查看当前集群的 CN 节点信息。                                 |
-| '/dbs'                       | 查看当前集群的数据库信息。                                   |
+| '/dbs'                       | 查看当前集群的数据库、表、分区以及 Tablet 信息。                                   |
 | '/jobs'                      | 查看当前集群的作业信息。                                     |
 | '/statistic'                 | 查看当前集群各数据库的统计信息。                             |
 | '/tasks'                     | 查看当前集群各种任务类型的总数和失败总数。                   |
@@ -115,17 +124,32 @@ ClusterDecommissioned: false
 示例二：查看当前集群的数据库信息。
 
 ```Plain
-mysql> SHOW PROC '/dbs';
-+---------+------------------------+----------+----------------+--------------------------+---------------------+
-| DbId    | DbName                 | TableNum | Quota          | LastConsistencyCheckTime | ReplicaQuota        |
-+---------+------------------------+----------+----------------+--------------------------+---------------------+
-| 1       | information_schema     | 22       | 8388608.000 TB | NULL                     | 9223372036854775807 |
-| 840997  | tpcds_100g             | 25       | 1024.000 GB    | NULL                     | 1073741824          |
-| 1275196 | _statistics_           | 3        | 8388608.000 TB | 2022-09-06 23:00:58      | 9223372036854775807 |
-| 1286207 | tpcds_n                | 24       | 8388608.000 TB | NULL                     | 9223372036854775807 |
-| 1381289 | test                   | 6        | 8388608.000 TB | 2022-01-14 23:10:18      | 9223372036854775807 |
-| 6186781 | test_stddev            | 1        | 8388608.000 TB | 2022-09-06 23:00:58      | 9223372036854775807 |
-+---------+------------------------+----------+----------------+--------------------------+---------------------+
+mysql> show proc "/dbs";
++-------+--------------------+----------+----------------+--------------------------+---------------------+
+| DbId  | DbName             | TableNum | Quota          | LastConsistencyCheckTime | ReplicaQuota        |
++-------+--------------------+----------+----------------+--------------------------+---------------------+
+| 1     | information_schema | 54       | 8388608.000 TB | NULL                     | 9223372036854775807 |
+| 100   | sys                | 6        | 8388608.000 TB | NULL                     | 9223372036854775807 |
+| 10001 | _statistics_       | 12       | 8388608.000 TB | NULL                     | 9223372036854775807 |
+| 10015 | test               | 1        | 8388608.000 TB | NULL                     | 9223372036854775807 |
++-------+--------------------+----------+----------------+--------------------------+---------------------+
+4 rows in set (0.00 sec)
+mysql> show proc "/dbs/test";
++---------+------------------+----------+---------------------+--------------+--------+--------------+--------------------------+--------------+---------------+--------------------------------------------------------------------------------------------------------+
+| TableId | TableName        | IndexNum | PartitionColumnName | PartitionNum | State  | Type         | LastConsistencyCheckTime | ReplicaCount | PartitionType | StoragePath                                                                                            |
++---------+------------------+----------+---------------------+--------------+--------+--------------+--------------------------+--------------+---------------+--------------------------------------------------------------------------------------------------------+
+| 10207   | source_wiki_edit | 1        | event_time          | 4            | NORMAL | CLOUD_NATIVE | NULL                     | 8            | RANGE         | s3://test/xxx                                                                                          |
++---------+------------------+----------+---------------------+--------------+--------+--------------+--------------------------+--------------+---------------+--------------------------------------------------------------------------------------------------------+
+1 row in set (0.00 sec)
+mysql> show proc "/dbs/test/source_wiki_edit";
++-----------------+
+| Nodes           |
++-----------------+
+| partitions      |
+| temp_partitions |
+| index_schema    |
++-----------------+
+3 rows in set (0.00 sec)
 ```
 
 | **返回**                 | **说明**                     |
@@ -136,6 +160,19 @@ mysql> SHOW PROC '/dbs';
 | Quota                    | 数据库设置的存储配额。       |
 | LastConsistencyCheckTime | 数据库上一次一致性检查时间。 |
 | ReplicaQuota             | 数据库的副本配额。           |
+| TableId                  | 表 ID。                                         |
+| TableName                | 表名称。                                       |
+| PartitionColumnName      | 分区列名。                           |
+| PartitionNum             | 表中分区的数量。                |
+| State                    | 表的状态。                              |
+| Type                     | 表的类型。                                |
+| LastConsistencyCheckTime | 上一次执行一致性检查的时间。 |
+| ReplicaCount             | 表的副本数量。                 |
+| PartitionType            | 表中分区的类型。              |
+| StoragePath              | 表的存储路径。                       |
+| partitions               | 表中的分区。                          |
+| temp_partitions          | 表中的临时分区。                |
+| index_schema             | 表中的同步物化视图。      |
 
 示例三：查看当前集群的作业信息。您可以通过对应的 `DbId` 进一步查询该数据库中的详细作业信息。
 
@@ -380,6 +417,7 @@ mysql> SHOW PROC '/cluster_balance';
 +-------------------+--------+
 | Item              | Number |
 +-------------------+--------+
+| balance_stat      | 1      |
 | cluster_load_stat | 1      |
 | working_slots     | 3      |
 | sched_stat        | 1      |
@@ -392,8 +430,30 @@ mysql> SHOW PROC '/cluster_balance';
 
 | **返回** | **说明**                                     |
 | -------- | -------------------------------------------- |
-| Item     | cluster_balance 中的子命令。<ul><li>cluster_load_stat: 集群当前的负载状态。</li><li>working_slots: 当前可用的工作插槽数。</li><li>sched_stat: 调度系统的当前状态。</li><li>priority_repair: 当前需要优先处理的 Tablet 修复任务数。</li><li>pending_tablets: 当前等待处理的 Tablet 数量。</li><li>running_tablets: 当前正在修复的 Tablet 数量。</li><li>history_tablets: 历史上修复过的 Tablet 数量。</li></ul>                 |
+| Item     | cluster_balance 中的子命令。<ul><li>balance_stat: 集群当前的均衡状态。</li><li>cluster_load_stat: 集群当前的负载状态。</li><li>working_slots: 当前可用的工作插槽数。</li><li>sched_stat: 调度系统的当前状态。</li><li>priority_repair: 当前需要优先处理的 Tablet 修复任务数。</li><li>pending_tablets: 当前等待处理的 Tablet 数量。</li><li>running_tablets: 当前正在修复的 Tablet 数量。</li><li>history_tablets: 历史上修复过的 Tablet 数量。</li></ul>                 |
 | Number   | cluster_balance 中每个子命令正在执行的个数。 |
+
+```Plain
+mysql> SHOW PROC '/cluster_balance/balance_stat';
++---------------+--------------------------------+----------+----------------+----------------+
+| StorageMedium | BalanceType                    | Balanced | PendingTablets | RunningTablets |
++---------------+--------------------------------+----------+----------------+----------------+
+| HDD           | inter-node disk usage          | true     | 0              | 0              |
+| HDD           | inter-node tablet distribution | true     | 0              | 0              |
+| HDD           | intra-node disk usage          | true     | 0              | 0              |
+| HDD           | intra-node tablet distribution | true     | 0              | 0              |
+| HDD           | colocation group               | true     | 0              | 0              |
+| HDD           | label-aware location           | true     | 0              | 0              |
++---------------+--------------------------------+----------+----------------+----------------+
+```
+
+| **返回**       | **说明**                        |
+| -------------- | ------------------------------- |
+| StorageMedium  | 存储介质。                      |
+| BalanceType    | 均衡类型。                      |
+| Balanced       | 是否均衡。                      |
+| PendingTablets | 任务状态为 Pending 的 Tablet 数。 |
+| RunningTablets | 任务状态为 Running 的 Tablet 数。 |
 
 示例十二：查看当前集群的 Colocate Join Group 信息。
 

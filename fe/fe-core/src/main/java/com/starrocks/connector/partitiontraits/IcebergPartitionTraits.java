@@ -22,10 +22,11 @@ import com.starrocks.catalog.IcebergPartitionKey;
 import com.starrocks.catalog.IcebergTable;
 import com.starrocks.catalog.NullablePartitionKey;
 import com.starrocks.catalog.PartitionKey;
+import com.starrocks.catalog.Type;
 import com.starrocks.common.AnalysisException;
+import com.starrocks.common.tvr.TvrTableSnapshot;
 import com.starrocks.connector.ConnectorMetadatRequestContext;
 import com.starrocks.connector.PartitionInfo;
-import com.starrocks.connector.TableVersionRange;
 import com.starrocks.connector.iceberg.IcebergPartitionUtils;
 import com.starrocks.server.GlobalStateMgr;
 import org.apache.iceberg.PartitionField;
@@ -77,7 +78,7 @@ public class IcebergPartitionTraits extends DefaultTraits {
                 .map(Snapshot::snapshotId);
         ConnectorMetadatRequestContext requestContext = new ConnectorMetadatRequestContext();
         requestContext.setQueryMVRewrite(isQueryMVRewrite());
-        requestContext.setTableVersionRange(TableVersionRange.withEnd(snapshotId));
+        requestContext.setTableVersionRange(TvrTableSnapshot.of(snapshotId));
         return GlobalStateMgr.getCurrentState().getMetadataMgr().listPartitionNames(
                 table.getCatalogName(), getCatalogDBName(), getTableName(), requestContext);
     }
@@ -138,6 +139,18 @@ public class IcebergPartitionTraits extends DefaultTraits {
         Optional<Snapshot> snapshot = Optional.ofNullable(icebergTable.getNativeTable().currentSnapshot());
         return snapshot.map(value -> LocalDateTime.ofInstant(Instant.ofEpochMilli(value.timestampMillis()).
                 plusSeconds(extraSeconds), Clock.systemDefaultZone().getZone())).orElse(null);
+    }
+
+    @Override
+    public PartitionKey createPartitionKeyWithType(List<String> values, List<Type> types) throws AnalysisException {
+        PartitionKey partitionKey = super.createPartitionKeyWithType(values, types);
+        for (int i = 0; i < types.size(); i++) {
+            LiteralExpr exprValue = partitionKey.getKeys().get(i);
+            if (exprValue.getType().isDecimalV3()) {
+                exprValue.setType(types.get(i)); //keep the precision and scale.
+            }
+        }
+        return partitionKey;
     }
 }
 

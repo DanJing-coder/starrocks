@@ -24,9 +24,9 @@ import com.starrocks.analysis.FunctionCallExpr;
 import com.starrocks.analysis.InPredicate;
 import com.starrocks.analysis.IntLiteral;
 import com.starrocks.analysis.LiteralExpr;
-import com.starrocks.analysis.ParseNode;
 import com.starrocks.analysis.Subquery;
 import com.starrocks.sql.analyzer.SemanticException;
+import com.starrocks.sql.ast.ParseNode;
 import com.starrocks.sql.ast.QueryRelation;
 import org.apache.commons.collections4.CollectionUtils;
 
@@ -122,7 +122,7 @@ public class SPMPlaceholderBuilder {
     private class PlaceholderInserter extends SPMUpdateExprVisitor<Expr> {
         @Override
         public ParseNode visitInPredicate(InPredicate node, Expr root) {
-            if (node.getChildren().stream().skip(1).anyMatch(SPMFunctions::isSPMFunctions)) {
+            if (SPMFunctions.isSPMFunctions(node)) {
                 return visitExpression(node, root);
             }
             if (!node.isConstantValues()) {
@@ -243,7 +243,7 @@ public class SPMPlaceholderBuilder {
 
         @Override
         public ParseNode visitInPredicate(InPredicate node, Expr root) {
-            if (node.getChildren().stream().skip(1).anyMatch(SPMFunctions::isSPMFunctions)) {
+            if (SPMFunctions.isSPMFunctions(node)) {
                 return visitExpression(node, root);
             }
             if (!node.isConstantValues()) {

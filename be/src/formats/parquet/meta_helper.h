@@ -22,7 +22,7 @@
 #include <unordered_set>
 #include <vector>
 
-#include "exec/hdfs_scanner.h"
+#include "exec/hdfs_scanner/hdfs_scanner.h"
 #include "formats/parquet/group_reader.h"
 #include "formats/parquet/metadata.h"
 #include "gen_cpp/Descriptors_types.h"
@@ -44,7 +44,7 @@ namespace starrocks::parquet {
 
 class MetaHelper {
 public:
-    MetaHelper(FileMetaData* file_metadata, bool case_sensitive)
+    MetaHelper(const FileMetaData* file_metadata, bool case_sensitive)
             : _file_metadata(file_metadata), _case_sensitive(case_sensitive) {}
     virtual ~MetaHelper() = default;
 
@@ -65,13 +65,14 @@ protected:
         return column;
     }
 
-    FileMetaData* _file_metadata = nullptr;
+    const FileMetaData* _file_metadata = nullptr;
     bool _case_sensitive = false;
 };
 
 class ParquetMetaHelper : public MetaHelper {
 public:
-    ParquetMetaHelper(FileMetaData* file_metadata, bool case_sensitive) : MetaHelper(file_metadata, case_sensitive) {}
+    ParquetMetaHelper(const FileMetaData* file_metadata, bool case_sensitive)
+            : MetaHelper(file_metadata, case_sensitive) {}
     ~ParquetMetaHelper() override = default;
 
     void prepare_read_columns(const std::vector<HdfsScannerContext::ColumnInfo>& materialized_columns,
@@ -84,7 +85,7 @@ private:
 
 class LakeMetaHelper : public MetaHelper {
 public:
-    LakeMetaHelper(FileMetaData* file_metadata, bool case_sensitive, const TIcebergSchema* t_lake_schema)
+    LakeMetaHelper(const FileMetaData* file_metadata, bool case_sensitive, const TIcebergSchema* t_lake_schema)
             : MetaHelper(file_metadata, case_sensitive) {
         _lake_schema = t_lake_schema;
         DCHECK(_lake_schema != nullptr);

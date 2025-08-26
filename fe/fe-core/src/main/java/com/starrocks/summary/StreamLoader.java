@@ -56,7 +56,7 @@ class StreamLoader {
             InterruptedException {
         Frontend fe = GlobalStateMgr.getCurrentState().getNodeMgr().getMySelf();
         label += fe.getHost().replace(".", "_");
-        label += fe.getEditLogPort();
+        label += "_" + System.identityHashCode(this);
         label += "_" + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"));
 
         String authString = fe.getHost() + ":" + fe.getNodeName();
@@ -99,7 +99,7 @@ class StreamLoader {
         List<Long> nodeIds = new ArrayList<>();
         if (RunMode.isSharedDataMode()) {
             List<Long> computeIds = GlobalStateMgr.getCurrentState().getWarehouseMgr()
-                    .getAllComputeNodeIds(WarehouseManager.DEFAULT_WAREHOUSE_NAME);
+                    .getAllComputeNodeIds(WarehouseManager.DEFAULT_RESOURCE);
             for (long nodeId : computeIds) {
                 ComputeNode node =
                         GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo().getBackendOrComputeNode(nodeId);

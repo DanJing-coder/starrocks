@@ -34,9 +34,14 @@
 
 package com.starrocks.catalog;
 
+import com.google.common.base.Enums;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
+import com.starrocks.analysis.BinaryPredicate;
 import com.starrocks.analysis.BinaryType;
+import com.starrocks.analysis.Expr;
+import com.starrocks.analysis.SlotRef;
+import com.starrocks.analysis.StringLiteral;
 import com.starrocks.catalog.MaterializedIndex.IndexExtState;
 import com.starrocks.catalog.Replica.ReplicaStatus;
 import com.starrocks.catalog.Table.TableType;
@@ -47,6 +52,7 @@ import com.starrocks.common.util.concurrent.lock.Locker;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.server.RunMode;
+import com.starrocks.server.WarehouseManager;
 import com.starrocks.sql.ast.AdminShowReplicaDistributionStmt;
 import com.starrocks.sql.ast.AdminShowReplicaStatusStmt;
 import com.starrocks.sql.ast.PartitionNames;
@@ -63,8 +69,26 @@ import java.util.Map;
 public class MetadataViewer {
 
     public static List<List<String>> getTabletStatus(AdminShowReplicaStatusStmt stmt) throws DdlException {
+        Replica.ReplicaStatus statusFilter = null;
+        BinaryType op = null; // Default to null instead of stmt.getOp()
+        Expr where = stmt.getWhere();
+
+        // Analyze where clause to extract statusFilter and op directly in this method
+        if (where != null) {
+            if (where instanceof BinaryPredicate binaryPredicate) {
+                op = binaryPredicate.getOp();
+                Expr leftChild = binaryPredicate.getChild(0);
+                Expr rightChild = binaryPredicate.getChild(1);
+                String leftKey = ((SlotRef) leftChild).getColumnName();
+                if (rightChild instanceof StringLiteral && leftKey.equalsIgnoreCase("status")) {
+                    statusFilter = Enums.getIfPresent(Replica.ReplicaStatus.class,
+                            ((StringLiteral) rightChild).getStringValue().toUpperCase()).orNull();
+                }
+            }
+        }
+
         return getTabletStatus(stmt.getDbName(), stmt.getTblName(), stmt.getPartitions(),
-                stmt.getStatusFilter(), stmt.getOp());
+                statusFilter, op);
     }
 
     private static List<List<String>> getTabletStatus(String dbName, String tblName, List<String> partitions,
@@ -76,7 +100,7 @@ public class MetadataViewer {
 
         Database db = globalStateMgr.getLocalMetastore().getDb(dbName);
         if (db == null) {
-            throw new DdlException("Database " + dbName + " does not exsit");
+            throw new DdlException("Database " + dbName + " does not exist");
         }
 
         Locker locker = new Locker();
@@ -205,7 +229,7 @@ public class MetadataViewer {
         GlobalStateMgr globalStateMgr = GlobalStateMgr.getCurrentState();
         Database db = globalStateMgr.getLocalMetastore().getDb(dbName);
         if (db == null) {
-            throw new DdlException("Database " + dbName + " does not exsit");
+            throw new DdlException("Database " + dbName + " does not exist");
         }
 
         Locker locker = new Locker();
@@ -284,10 +308,10 @@ public class MetadataViewer {
         if (RunMode.isSharedDataMode()) {
             // check warehouse
             long warehouseId = ConnectContext.get().getCurrentWarehouseId();
-            List<Long> computeNodeIs =
-                    GlobalStateMgr.getCurrentState().getWarehouseMgr().getAllComputeNodeIds(warehouseId);
+            final WarehouseManager warehouseManager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
+            List<Long> computeNodeIs = warehouseManager.getAllComputeNodeIds(warehouseId);
             if (computeNodeIs.isEmpty()) {
-                Warehouse warehouse = GlobalStateMgr.getCurrentState().getWarehouseMgr().getWarehouse(warehouseId);
+                final Warehouse warehouse = GlobalStateMgr.getCurrentState().getWarehouseMgr().getWarehouse(warehouseId);
                 throw new DdlException("no available compute nodes in warehouse " + warehouse.getName());
             }
             allComputeNodeIds.addAll(computeNodeIs);
@@ -311,7 +335,7 @@ public class MetadataViewer {
         GlobalStateMgr globalStateMgr = GlobalStateMgr.getCurrentState();
         Database db = globalStateMgr.getLocalMetastore().getDb(dbName);
         if (db == null) {
-            throw new DdlException("Database " + dbName + " does not exsit");
+            throw new DdlException("Database " + dbName + " does not exist");
         }
 
         Locker locker = new Locker();
@@ -340,44 +364,47 @@ public class MetadataViewer {
             }
 
             Collections.sort(partitionIds);
+
             for (long partitionId : partitionIds) {
                 Partition partition = olapTable.getPartition(partitionId);
-                DistributionInfo distributionInfo = partition.getDistributionInfo();
-
-                List<Long> rowCountStatistics = Lists.newArrayListWithCapacity(distributionInfo.getBucketNum());
-                List<Long> dataSizeStatistics = Lists.newArrayListWithCapacity(distributionInfo.getBucketNum());
-                for (long i = 0; i < distributionInfo.getBucketNum(); i++) {
-                    rowCountStatistics.add(0L);
-                    dataSizeStatistics.add(0L);
+                if (partition == null) {
+                    continue;
                 }
 
-                long totalRowCount = 0;
-                long totalDataSize = 0;
                 for (PhysicalPartition physicalPartition : partition.getSubPartitions()) {
-                    long version = physicalPartition.getVisibleVersion();
                     for (MaterializedIndex index : physicalPartition.getMaterializedIndices(IndexExtState.VISIBLE)) {
-                        List<Long> tabletIds = index.getTabletIdsInOrder();
-                        for (int i = 0; i < tabletIds.size(); i++) {
-                            Tablet tablet = index.getTablet(tabletIds.get(i));
+                        List<Tablet> tablets = index.getTablets();
+
+                        List<Long> rowCountStatistics = Lists.newArrayListWithCapacity(tablets.size());
+                        List<Long> dataSizeStatistics = Lists.newArrayListWithCapacity(tablets.size());
+
+                        long totalRowCount = 0;
+                        long totalDataSize = 0;
+                        long version = physicalPartition.getVisibleVersion();
+                        for (Tablet tablet : tablets) {
                             long rowCount = tablet.getRowCount(version);
                             long dataSize = tablet.getDataSize(true);
-                            rowCountStatistics.set(i, rowCountStatistics.get(i) + rowCount);
-                            dataSizeStatistics.set(i, dataSizeStatistics.get(i) + dataSize);
+                            rowCountStatistics.add(rowCount);
+                            dataSizeStatistics.add(dataSize);
                             totalRowCount += rowCount;
                             totalDataSize += dataSize;
                         }
-                    }
-                }
 
-                for (int i = 0; i < distributionInfo.getBucketNum(); i++) {
-                    List<String> row = Lists.newArrayList();
-                    row.add(partition.getName());
-                    row.add(String.valueOf(i));
-                    row.add(String.valueOf(rowCountStatistics.get(i)));
-                    row.add(totalRowCount == 0L ? "0.00 %" : df.format((double) rowCountStatistics.get(i) / totalRowCount));
-                    row.add(String.valueOf(dataSizeStatistics.get(i)));
-                    row.add(totalDataSize == 0L ? "0.00 %" : df.format((double) dataSizeStatistics.get(i) / totalDataSize));
-                    result.add(row);
+                        for (int i = 0; i < tablets.size(); i++) {
+                            List<String> row = Lists.newArrayList();
+                            row.add(partition.getName());
+                            row.add(String.valueOf(physicalPartition.getId()));
+                            row.add(olapTable.getIndexNameById(index.getId()));
+                            row.add(index.getVirtualBucketsByTabletId(tablets.get(i).getId()).toString());
+                            row.add(String.valueOf(rowCountStatistics.get(i)));
+                            row.add(totalRowCount == 0L ? "0.00 %"
+                                    : df.format((double) rowCountStatistics.get(i) / totalRowCount));
+                            row.add(String.valueOf(dataSizeStatistics.get(i)));
+                            row.add(totalDataSize == 0L ? "0.00 %"
+                                    : df.format((double) dataSizeStatistics.get(i) / totalDataSize));
+                            result.add(row);
+                        }
+                    }
                 }
             }
         } finally {

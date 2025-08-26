@@ -41,7 +41,7 @@ Status DiskSpace::init_spaces(const std::vector<DirSpace>& dir_spaces) {
 
     // We check this switch after some information are initialized, because even if it is off now,
     // we still need this information once the switch is turn on online.
-    if (!config::datacache_auto_adjust_enable) {
+    if (!config::enable_datacache_disk_auto_adjust) {
         return st;
     }
 
@@ -121,9 +121,9 @@ Status DiskSpace::_update_disk_options() {
     ASSIGN_OR_RETURN(_disk_opts.cache_upper_limit,
                      DataCacheUtils::parse_conf_datacache_disk_size(_path, config::datacache_disk_size,
                                                                     _disk_stats.capacity_bytes));
-    _disk_opts.low_level_size = _disk_stats.capacity_bytes * 0.01 * config::datacache_disk_low_level;
-    _disk_opts.safe_level_size = _disk_stats.capacity_bytes * 0.01 * config::datacache_disk_safe_level;
-    _disk_opts.high_level_size = _disk_stats.capacity_bytes * 0.01 * config::datacache_disk_high_level;
+    _disk_opts.low_level_size = _disk_stats.capacity_bytes * 0.01 * config::disk_low_level;
+    _disk_opts.safe_level_size = _disk_stats.capacity_bytes * 0.01 * config::disk_safe_level;
+    _disk_opts.high_level_size = _disk_stats.capacity_bytes * 0.01 * config::disk_high_level;
     _disk_opts.adjust_interval_s = config::datacache_disk_adjust_interval_seconds;
     _disk_opts.idle_for_expansion_s = config::datacache_disk_idle_seconds_for_expansion;
 
@@ -184,11 +184,11 @@ size_t DiskSpace::_check_cache_limit(int64_t cache_quota) {
 size_t DiskSpace::_check_cache_low_limit(int64_t cache_quota) {
     if (cache_quota < _disk_opts.cache_lower_limit) {
         if (_disabled) {
-            // If the cache quata is already disabled, skip adjusting it repeatedly.
+            // If the cache quota is already disabled, skip adjusting it repeatedly.
             VLOG(1) << "Skip updating the disk cache quota because the target quota is less than"
                     << " `datacache_min_disk_quota_for_adjustment`, path: " << _path;
         } else {
-            // This warning log only be printed when the cache disk quota is adjust from a non-zero integer to zero.
+            // This warning log only be printed when the cache disk quota is adjusted from a non-zero integer to zero.
             LOG(WARNING) << "The current available disk space is too small, so disable the disk cache directly."
                          << " If you still need it, you could reduce the value of"
                          << " `datacache_min_disk_quota_for_adjustment`, path: " << _path;
@@ -224,10 +224,10 @@ dev_t DiskSpace::FileSystemWrapper::device_id(const std::string& path) {
     return DataCacheUtils::disk_device_id(path);
 }
 
-DiskSpaceMonitor::DiskSpaceMonitor(LocalCache* cache)
+DiskSpaceMonitor::DiskSpaceMonitor(LocalCacheEngine* cache)
         : _cache(cache), _fs(std::make_shared<DiskSpace::FileSystemWrapper>()) {}
 
-DiskSpaceMonitor::DiskSpaceMonitor(LocalCache* cache, std::shared_ptr<DiskSpace::FileSystemWrapper> fs)
+DiskSpaceMonitor::DiskSpaceMonitor(LocalCacheEngine* cache, std::shared_ptr<DiskSpace::FileSystemWrapper> fs)
         : _cache(cache), _fs(std::move(fs)) {}
 
 DiskSpaceMonitor::~DiskSpaceMonitor() {
@@ -272,7 +272,7 @@ void DiskSpaceMonitor::start() {
     }
     _stopped.store(false, std::memory_order_release);
     _adjust_datacache_thread = std::thread([this] { _adjust_datacache_callback(); });
-    Thread::set_thread_name(_adjust_datacache_thread, "adjust_datacache");
+    Thread::set_thread_name(_adjust_datacache_thread, "adjust_disk_cache");
 }
 
 void DiskSpaceMonitor::stop() {
@@ -292,7 +292,7 @@ bool DiskSpaceMonitor::is_stopped() {
 void DiskSpaceMonitor::_adjust_datacache_callback() {
     while (!is_stopped()) {
         std::unique_lock<std::mutex> lck(_mutex);
-        if (_cache->is_initialized() && config::datacache_auto_adjust_enable &&
+        if (_cache->is_initialized() && config::enable_datacache_disk_auto_adjust &&
             !_updating.load(std::memory_order_acquire)) {
             if (_adjust_spaces_by_disk_usage()) {
                 auto dir_spaces = all_dir_spaces();
@@ -353,7 +353,7 @@ std::string DiskSpaceMonitor::to_string(const std::vector<DirSpace>& dir_spaces)
 }
 
 void DiskSpaceMonitor::_update_cache_stats() {
-    const auto metrics = _cache->cache_metrics(0);
+    const auto metrics = _cache->cache_metrics();
     _total_cache_usage = metrics.disk_used_bytes;
     _total_cache_quota = metrics.disk_quota_bytes;
 }

@@ -35,12 +35,6 @@
 package com.starrocks.sql.ast;
 
 import com.google.common.base.Preconditions;
-import com.starrocks.analysis.HintNode;
-import com.starrocks.analysis.ParseNode;
-import com.starrocks.analysis.RedirectStatus;
-import com.starrocks.common.profile.Tracers;
-import com.starrocks.qe.ConnectContext;
-import com.starrocks.qe.OriginStatement;
 import com.starrocks.sql.parser.NodePosition;
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.EnumUtils;
@@ -87,7 +81,7 @@ public abstract class StatementBase implements ParseNode {
 
     private ExplainLevel explainLevel;
 
-    private Tracers.Mode traceMode;
+    private String traceMode;
 
     private String traceModule;
 
@@ -108,7 +102,7 @@ public abstract class StatementBase implements ParseNode {
         this.explainLevel = explainLevel;
     }
 
-    public void setIsTrace(Tracers.Mode mode, String module) {
+    public void setIsTrace(String mode, String module) {
         this.isExplain = true;
         this.traceMode = mode;
         this.traceModule = module;
@@ -118,12 +112,20 @@ public abstract class StatementBase implements ParseNode {
         return isExplain;
     }
 
-    public Tracers.Mode getTraceMode() {
+    public String getTraceMode() {
         return traceMode;
     }
 
     public String getTraceModule() {
         return traceModule;
+    }
+
+    public boolean isExplainTrace() {
+        return isExplain && traceMode != null && !traceMode.equals("NONE");
+    }
+
+    public boolean isExplainAnalyze() {
+        return isExplain && explainLevel == ExplainLevel.ANALYZE;
     }
 
     public ExplainLevel getExplainLevel() {
@@ -133,8 +135,6 @@ public abstract class StatementBase implements ParseNode {
             return explainLevel;
         }
     }
-
-    public abstract RedirectStatus getRedirectStatus();
 
     public void setOrigStmt(OriginStatement origStmt) {
         Preconditions.checkState(origStmt != null);
@@ -149,7 +149,6 @@ public abstract class StatementBase implements ParseNode {
     public NodePosition getPos() {
         return pos;
     }
-
 
     public List<HintNode> getHintNodes() {
         return hintNodes;
@@ -169,9 +168,5 @@ public abstract class StatementBase implements ParseNode {
 
     public boolean isExistQueryScopeHint() {
         return CollectionUtils.isNotEmpty(allQueryScopeHints);
-    }
-
-    public int getTimeout() {
-        return ConnectContext.get().getSessionVariable().getQueryTimeoutS();
     }
 }
